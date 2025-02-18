@@ -12,7 +12,7 @@ DocBank: liminghao1630/DocBank · Datasets at Hugging Face
 ## Project Outline (Tentative):
 
 1st Phase: Foundation of IL and EVM & Literature Review [#1][i1]
-  1. Background Study - 2 weeks - 
+  1. Background Study 
      - 1.1. Literature Review :
          - a. [https://arxiv.org/pdf/2003.02261.pdf](https://arxiv.org/pdf/2205.14892v1)
          - b. [https://arxiv.org/ftp/arxiv/papers/1905/1905.07203.pdf](https://arxiv.org/pdf/2302.03648v2)
