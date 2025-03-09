@@ -33,6 +33,6 @@ DocBank: liminghao1630/DocBank · Datasets at Hugging Face
 
 4th Phase: Evaluation of the Initial Implementation
 
-[i1]: [https://github.com/abdulahad2307/FAU-Project_CV-Ahad/issues/1](https://github.com/abdulahad2307/FAU-Masters_Thesis-Ahad/issues/1)
-[i2]: [https://github.com/abdulahad2307/FAU-Project_CV-Ahad/issues/5](https://github.com/abdulahad2307/FAU-Masters_Thesis-Ahad/issues/5)
-[i3]: [https://github.com/abdulahad2307/FAU-Project_CV-Ahad/issues/6](https://github.com/abdulahad2307/FAU-Masters_Thesis-Ahad/issues/6)
+[i1]: https://github.com/abdulahad2307/FAU-Masters_Thesis-Ahad/issues/1
+[i2]: https://github.com/abdulahad2307/FAU-Masters_Thesis-Ahad/issues/5
+[i3]: https://github.com/abdulahad2307/FAU-Masters_Thesis-Ahad/issues/6
