@@ -23,11 +23,11 @@ DocBank: liminghao1630/DocBank · Datasets at Hugging Face
 
 2nd Phase: Dataset Analysis [#2][i2] and Baseline Model Implementation [#3][i3]
   1. Data Analysis:
-    - 1.1. Exploratory Data Analysis
-  2. Baseline Model Implementation
-    - 2.1. Dataset Preperation
-    - 2.2. Basic Classification Model Implementation
-    - 2.3. SOTA Model Implementation
+     - 1.1. Exploratory Data Analysis
+  3. Baseline Model Implementation
+     - 2.1. Dataset Preperation
+     - 2.2. Basic Classification Model Implementation
+     - 2.3. SOTA Model Implementation
 
 3rd Phase: Incremental Learning Strategy Design with EVM
 
