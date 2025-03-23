@@ -37,25 +37,41 @@ class DataLoader:
         self.test_dataset = self.load_dataset("test")
 
     def load_dataset(self, dataset_type):
-        """
-        Loads a dataset based on the type ('train', 'val', 'test').
-        """
         dataset_path = os.path.join(self.data_dir, dataset_type)
 
         if not os.path.exists(dataset_path):
             raise ValueError(f"{dataset_type} directory does not exist: {dataset_path}")
 
-        # Apply transformations and load dataset using ImageFolder
         dataset = ImageFolder(root=dataset_path, transform=self.transform)
+
+        print(f"Loaded dataset: {dataset_type}, Found {len(dataset.samples)} samples before filtering.")
 
         # If specific classes are provided, filter the dataset
         if self.classes is not None:
-            class_indices = [dataset.class_to_idx[class_name] for class_name in self.classes if class_name in dataset.class_to_idx]
-            dataset.samples = [sample for sample in dataset.samples if sample[1] in class_indices]
-            dataset.targets = [target for target in dataset.targets if target in class_indices]
+            # Create a mapping from class names to indices
+            class_to_idx = {class_name: idx for idx, class_name in enumerate(self.classes)}
+            
+            # Filter samples and targets
+            filtered_samples = []
+            filtered_targets = []
+            for sample, target in dataset.samples:
+                class_name = dataset.classes[target]
+                if class_name in self.classes:
+                    filtered_samples.append((sample, class_to_idx[class_name]))
+                    filtered_targets.append(class_to_idx[class_name])
+
+            dataset.samples = filtered_samples
+            dataset.targets = filtered_targets
+            dataset.class_to_idx = class_to_idx
+            dataset.classes = self.classes
+
+            print(f"Dataset after filtering by classes: {dataset_type}, Remaining samples: {len(dataset.samples)}")
+
+            if len(dataset.samples) == 0:
+                raise ValueError(f"Filtered dataset is empty! Check if class names are correct: {self.classes}")
 
         return dataset
-
+    
     def get_data_loader(self, dataset_type):
         """
         This function returns a DataLoader object for the specified dataset type (train, val, test).
@@ -71,6 +87,7 @@ class DataLoader:
 
         # Ensures correct DataLoader initialization with shuffle only for training
         return TorchDataLoader(dataset, batch_size=self.batch_size, shuffle=(dataset_type == "train"), num_workers=self.num_workers)
+
 
     def load_data(self):
         """
@@ -99,6 +116,10 @@ if __name__ == "__main__":
     parser.add_argument("--classes", nargs="+", default=None, help="List of class names to load (default: all classes)")
 
     args = parser.parse_args()
+
+    if isinstance(args.classes, str):  # Ensure it's a string before splitting
+        args.classes = [c.strip() for c in args.classes.split(",")]
+
 
     loader = DataLoader(
         data_dir=args.data_dir,

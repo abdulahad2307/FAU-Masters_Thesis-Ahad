@@ -2,10 +2,19 @@ import os
 import datetime
 import argparse
 import torch
+import timm
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import StepLR
-from torchvision import models
+import pandas as pd
+from sklearn.metrics import (
+    roc_auc_score,
+    f1_score,
+    precision_score,
+    recall_score,
+    accuracy_score,
+)
+from tqdm import tqdm  # For progress bars
 
 from utils.dataloader import DataLoader
 
@@ -24,19 +33,13 @@ class BaselineModel:
         """
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.num_classes = num_classes
-
-        ## Loading models
-        if model_name == "resnet50":
-            self.model = models.resnet50(pretrained=True)
-            self.model.fc = nn.Linear(self.model.fc.in_features, num_classes)
-        elif model_name == "densenet121":
-            self.model = models.densenet121(pretrained=True)
-            self.model.classifier = nn.Linear(self.model.classifier.in_features, num_classes)
-        else:
-            raise ValueError("Unsupported model. Choose 'resnet50' or 'densenet121'.")
-
+        self.model_name = model_name
+        # Load model from timm
+        self.model = timm.create_model(model_name, pretrained=True, num_classes=self.num_classes)
         self.model = self.model.to(self.device)
         self.criterion = nn.CrossEntropyLoss()
+
+        # Optimizer
         self.optimizer_name = optimizer_name
         if self.optimizer_name == "adam":
             self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
@@ -50,6 +53,11 @@ class BaselineModel:
         # Learning rate scheduler
         self.scheduler = StepLR(self.optimizer, step_size=5, gamma=0.1)
 
+        # Early stopping
+        self.best_val_loss = float("inf")
+        self.early_stop_patience = 3  # Stop if validation loss doesn't improve for 3 epochs
+        self.early_stop_counter = 0
+
     def train(self, train_loader, val_loader, epochs=10):
         """
         Train the model.
@@ -61,62 +69,135 @@ class BaselineModel:
         """
         for epoch in range(epochs):
             self.model.train()
-            total_loss = 0
-            for images, labels in train_loader:
-                images, labels = images.to(self.device), labels.to(self.device)
+            running_loss = 0.0
 
+            # Training loop with progress bar
+            train_progress = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Training]", leave=False)
+            for inputs, labels in train_progress:
+                inputs, labels = inputs.to(self.device), labels.to(self.device)
                 self.optimizer.zero_grad()
-                outputs = self.model(images)
+                outputs = self.model(inputs)
                 loss = self.criterion(outputs, labels)
                 loss.backward()
                 self.optimizer.step()
-                self.scheduler.step()
+                running_loss += loss.item()
 
-                total_loss += loss.item()
+                # Update progress bar description
+                train_progress.set_postfix({"Training Loss": f"{loss.item():.4f}"})
 
-            print(f"Epoch [{epoch+1}/{epochs}], Loss: {total_loss / len(train_loader):.4f}")
+            # Print training loss
+            epoch_loss = running_loss / len(train_loader)
+            print(f"Epoch {epoch+1}/{epochs}, Training Loss: {epoch_loss:.4f}")
 
-            # Validation
-            val_accuracy= self.validate(val_loader)
-            print(f"Validation Accuracy: {val_accuracy:.2f}%")
+            # Validation loop with progress bar
+            val_loss, val_metrics = self.evaluate(val_loader)
+            print(
+                f"Validation Loss: {val_loss:.4f}, "
+                f"Validation Accuracy: {val_metrics['accuracy']:.2f}%, "
+                f"Validation F1 Score: {val_metrics['f1_score']:.4f}, "
+                f"Validation Precision: {val_metrics['precision']:.4f}, "
+                f"Validation Recall: {val_metrics['recall']:.4f}, "
+                f"Validation AUROC: {val_metrics['auroc']:.4f}"
+            )
 
-        
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
-        model_save_path = os.path.join(OUTPUT_DIR, f"{self.model_name}_{self.optimizer}.pth")
-        print(model_save_path)
-        torch.save(self.model.state_dict(), model_save_path)
-        print(f"Model saved at {model_save_path}")
+            # Learning rate scheduling
+            self.scheduler.step()
 
+            # Early stopping and model saving
+            if val_loss < self.best_val_loss:
+                self.best_val_loss = val_loss
+                self.early_stop_counter = 0
 
-    def validate(self, data_loader):
-        """Validate and Test the model.
-        
+                # Save the best model
+                os.makedirs(OUTPUT_DIR, exist_ok=True)
+                model_save_path = os.path.join(OUTPUT_DIR, f"{self.model_name}_best_epoch_{epoch+1}.pth")
+                torch.save(self.model.state_dict(), model_save_path)
+                print(f"Best model saved at {model_save_path}")
+            else:
+                self.early_stop_counter += 1
+                if self.early_stop_counter >= self.early_stop_patience:
+                    print(f"Early stopping at epoch {epoch+1} as validation loss did not improve for {self.early_stop_patience} epochs.")
+                    break
+
+    def evaluate(self, val_loader):
+        """Evaluate the model.
+
         Parameters:
-        data_loader: loads the data
+        val_loader: loads the validation data
+
+        Returns:
+        val_loss: Average validation loss
+        metrics: Dictionary containing accuracy, F1 score, precision, recall, and AUROC
         """
         self.model.eval()
-        correct, total = 0, 0
-        with torch.no_grad():
-            for images, labels in data_loader:
-                images, labels = images.to(self.device), labels.to(self.device)
-                outputs = self.model(images)
-                _, predicted = torch.max(outputs, 1)
-                total += labels.size(0)
-                correct += (predicted == labels).sum().item()
+        val_loss = 0.0
+        all_labels = []
+        all_preds = []
+        all_probs = []
 
-        accuracy = 100 * correct / total
-        return accuracy
+        # Validation loop with progress bar
+        val_progress = tqdm(val_loader, desc="[Validation]", leave=False)
+        with torch.no_grad():
+            for inputs, labels in val_progress:
+                inputs, labels = inputs.to(self.device), labels.to(self.device)
+                outputs = self.model(inputs)
+                loss = self.criterion(outputs, labels)
+                val_loss += loss.item()
+
+                # Get predicted class and probabilities
+                _, preds = torch.max(outputs, 1)
+                probs = torch.softmax(outputs, dim=1)
+
+                all_labels.extend(labels.cpu().numpy())
+                all_preds.extend(preds.cpu().numpy())
+                all_probs.extend(probs.cpu().numpy())
+
+                # Update progress bar description
+                val_progress.set_postfix({"Validation Loss": f"{loss.item():.4f}"})
+
+        val_loss /= len(val_loader)
+
+        # Calculate metrics
+        accuracy = accuracy_score(all_labels, all_preds)
+        f1 = f1_score(all_labels, all_preds, average="weighted")
+        precision = precision_score(all_labels, all_preds, average="weighted")
+        recall = recall_score(all_labels, all_preds, average="weighted")
+
+        # Calculate AUROC (only for binary classification or one-vs-rest for multi-class)
+        if self.num_classes == 2:
+            auroc = roc_auc_score(all_labels, all_probs[:, 1])
+        else:
+            auroc = roc_auc_score(all_labels, all_probs, multi_class="ovo", average="weighted")
+
+        metrics = {
+            "accuracy": accuracy * 100,
+            "f1_score": f1,
+            "precision": precision,
+            "recall": recall,
+            "auroc": auroc,
+        }
+
+        return val_loss, metrics
 
     def test(self, test_loader):
         """
-        Testing the model using the same validation function
+        Test the model.
+
+        Parameters:
+        test_loader: loads the test data
+
+        Returns:
+        test_metrics: Dictionary containing accuracy, F1 score, precision, recall, and AUROC
         """
-        test_accuracy= self.validate(test_loader)
-        return test_accuracy
-    
-    def save_training_log(model_name, optimizer_name, epochs, batch_size, num_classes, learning_rate, test_accuracy):
+        # Testing loop with progress bar
+        test_progress = tqdm(test_loader, desc="[Testing]", leave=False)
+        _, test_metrics = self.evaluate(test_loader)
+        return test_metrics
+
+    @staticmethod
+    def save_training_log(model_name, optimizer_name, epochs, batch_size, num_classes, learning_rate, test_metrics):
         """
-        Saving thetraining details to a CSV log file.
+        Save training details to a CSV log file.
         """
         log_data = {
             "Model": model_name,
@@ -125,8 +206,12 @@ class BaselineModel:
             "Batch Size": batch_size,
             "Num Classes": num_classes,
             "Learning Rate": learning_rate,
-            "Test Accuracy (%)": f"{test_accuracy:.2f}",
-            "Timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            "Test Accuracy (%)": f"{test_metrics['accuracy']:.2f}",
+            "Test F1 Score": f"{test_metrics['f1_score']:.4f}",
+            "Test Precision": f"{test_metrics['precision']:.4f}",
+            "Test Recall": f"{test_metrics['recall']:.4f}",
+            "Test AUROC": f"{test_metrics['auroc']:.4f}",
+            "Timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 
         log_file = "logs/training_log.csv"
@@ -147,7 +232,7 @@ if __name__ == "__main__":
     parser.add_argument("--data_dir", type=str, required=True, help="Path to organized dataset directory")
     parser.add_argument("--model_name", type=str, choices=["resnet50", "densenet121"], default="resnet50",
                         help="Model to use (resnet50 or densenet121)")
-    parser.add_argument("--num_classes", type=int, default=16, help="Number of classes")
+    parser.add_argument("--classes", nargs="+", default=None, help="List of class names to load (default: all classes)")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for DataLoader")
     parser.add_argument("--epochs", type=int, default=10, help="Number of training epochs")
     parser.add_argument("--learning_rate", type=float, default=0.001, help="Learning rate")
@@ -156,16 +241,25 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    num_classes = len(args.classes) if args.classes else 16
+
+    print(f"Using classes: {args.classes} and # of classes: {num_classes}") 
+
     ## Loading the dataset
-    data_loader = DataLoader(data_dir=args.data_dir, batch_size=args.batch_size, dataset_type="all")
+    data_loader = DataLoader(data_dir=args.data_dir, batch_size=args.batch_size, dataset_type="all", classes=args.classes)
     loaders = data_loader.load_data()
 
     ## Initializing and training model
-    model = BaselineModel(model_name=args.model_name, num_classes=args.num_classes, optimizer_name=args.optimizer, learning_rate=args.learning_rate, device=args.device)
+    model = BaselineModel(model_name=args.model_name, num_classes=num_classes, optimizer_name=args.optimizer, learning_rate=args.learning_rate, device=args.device)
     model.train(loaders["train"], loaders["val"], epochs=args.epochs)
-    test_accuracy = model.test(loaders["test"])
-    print(f"Test Accuracy: {test_accuracy:.2f}%")
+    test_metrics = model.test(loaders["test"])
+    print(
+        f"Test Accuracy: {test_metrics['accuracy']:.2f}%, "
+        f"Test F1 Score: {test_metrics['f1_score']:.4f}, "
+        f"Test Precision: {test_metrics['precision']:.4f}, "
+        f"Test Recall: {test_metrics['recall']:.4f}, "
+        f"Test AUROC: {test_metrics['auroc']:.4f}"
+    )
 
-
-    save_training_log(args.model_name, args.optimizer, args.epochs, args.batch_size, args.num_classes, 
-                      args.learning_rate, test_accuracy)
+    model.save_training_log(args.model_name, args.optimizer, args.epochs, args.batch_size, num_classes, 
+                      args.learning_rate, test_metrics)
