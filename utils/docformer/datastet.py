@@ -1,159 +1,143 @@
-import json
 import os
+import json
 from PIL import Image
 import torch
 from torch.utils.data import Dataset
 from transformers import BertTokenizer
+from torchvision import transforms
+import pytesseract
 
-class DocFormerDataset(Dataset):
+class RVLCDIPDataset(Dataset):
     """
-    Base dataset class for DocFormer
+    Dataset class for RVL-CDIP documents
+    Directory structure: data/{train,val,test}/class_name/image_name.tif
     """
-    def __init__(self, data_dir, tokenizer_name="microsoft/layoutlm-base-uncased", max_seq_length=512, split="train"):
-        self.data_dir = data_dir
+    def __init__(self, data_dir, tokenizer_name="bert-base-uncased", max_seq_length=512, split="train"):
+        self.data_dir = os.path.join(data_dir, split)
         self.tokenizer = BertTokenizer.from_pretrained(tokenizer_name)
         self.max_seq_length = max_seq_length
         self.split = split
         
-        # Load annotations
-        with open(os.path.join(data_dir, f"{split}.json"), "r") as f:
-            self.annotations = json.load(f)
-    
-    def __len__(self):
-        return len(self.annotations)
-    
-    def __getitem__(self, idx):
-        annotation = self.annotations[idx]
+        # Collect all samples
+        self.samples = []
+        self.class_names = []
+        self._load_samples()
+        
+        # Create label mappings
+        self.class_to_idx = {cls_name: idx for idx, cls_name in enumerate(sorted(set(self.class_names)))}
+        self.idx_to_class = {idx: cls_name for cls_name, idx in self.class_to_idx.items()}
+        
+        # Image transformations
+        self.transform = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                               std=[0.229, 0.224, 0.225])
+        ])
 
-        image_path = os.path.join(self.data_dir, "images", annotation["image_path"])
-        image = Image.open(image_path).convert("RGB")
+    def _load_samples(self):
+        """Load all samples from the directory structure"""
+        for class_name in os.listdir(self.data_dir):
+            class_dir = os.path.join(self.data_dir, class_name)
+            if os.path.isdir(class_dir):
+                for img_file in os.listdir(class_dir):
+                    if img_file.lower().endswith(('.tif', '.tiff', '.png', '.jpg', '.jpeg')):
+                        self.samples.append({
+                            'image_path': os.path.join(class_dir, img_file),
+                            'class_name': class_name
+                        })
+                        self.class_names.append(class_name)
+
+    def __len__(self):
+        return len(self.samples)
+
+    def _extract_text_and_bboxes(self, image):
+        """Extract text and bounding boxes using Tesseract OCR"""
+        ocr_data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
+        words, bboxes = [], []
         
-        # Text Tokenization and get bounding boxes
-        words = annotation["words"]
-        bboxes = annotation["bboxes"]
+        for i in range(len(ocr_data['text'])):
+            word = ocr_data['text'][i].strip()
+            if word:  # Only consider non-empty words
+                # Get bounding box (left, top, width, height)
+                left = ocr_data['left'][i]
+                top = ocr_data['top'][i]
+                right = left + ocr_data['width'][i]
+                bottom = top + ocr_data['height'][i]
+                
+                # Convert to quadrilateral format (8 coordinates)
+                bbox = [
+                    left, top,       # top-left
+                    right, top,      # top-right
+                    right, bottom,   # bottom-right
+                    left, bottom     # bottom-left
+                ]
+                
+                words.append(word)
+                bboxes.append(bbox)
         
-        # Tokenizing words and align bounding boxes
-        tokens = []
-        token_bboxes = []
+        return words, bboxes
+
+    def __getitem__(self, idx):
+        sample = self.samples[idx]
+        image = Image.open(sample['image_path']).convert('RGB')
+        
+        # Process image
+        pixel_values = self.transform(image)
+        
+        # Extract OCR data
+        words, bboxes = self._extract_text_and_bboxes(image)
+        
+        # Tokenize and align bounding boxes
+        input_ids = []
+        bbox_tensors = []
+        attention_mask = []
+        
+        # Add [CLS] token
+        input_ids.append(self.tokenizer.cls_token_id)
+        bbox_tensors.append([0]*8)  # Dummy bbox for special tokens
+        attention_mask.append(1)
+        
+        # Process each word
         for word, bbox in zip(words, bboxes):
             word_tokens = self.tokenizer.tokenize(word)
-            tokens.extend(word_tokens)
-            token_bboxes.extend([bbox] * len(word_tokens))
+            token_ids = self.tokenizer.convert_tokens_to_ids(word_tokens)
+            
+            # Extend bbox for each token
+            for _ in word_tokens:
+                bbox_tensors.append(bbox)
+                attention_mask.append(1)
+            input_ids.extend(token_ids)
         
-        # Truncate if too long
-        if len(tokens) > self.max_seq_length - 2:  # Account for [CLS] and [SEP]
-            tokens = tokens[:self.max_seq_length - 2]
-            token_bboxes = token_bboxes[:self.max_seq_length - 2]
+        # Add [SEP] token
+        input_ids.append(self.tokenizer.sep_token_id)
+        bbox_tensors.append([0]*8)
+        attention_mask.append(1)
         
-        # Adding special tokens
-        tokens = [self.tokenizer.cls_token] + tokens + [self.tokenizer.sep_token]
-        token_bboxes = [[0, 0, 0, 0, 0, 0, 0, 0]] + token_bboxes + [[0, 0, 0, 0, 0, 0, 0, 0]]
+        # Truncate/pad sequences
+        input_ids = input_ids[:self.max_seq_length]
+        attention_mask = attention_mask[:self.max_seq_length]
+        bbox_tensors = bbox_tensors[:self.max_seq_length]
         
-        # Converting to IDs
-        input_ids = self.tokenizer.convert_tokens_to_ids(tokens)
-        
-        # Creating attention mask
-        attention_mask = [1] * len(input_ids)
-        
-        # Pad to max length
         padding_length = self.max_seq_length - len(input_ids)
-        input_ids = input_ids + [self.tokenizer.pad_token_id] * padding_length
-        attention_mask = attention_mask + [0] * padding_length
-        token_bboxes = token_bboxes + [[0, 0, 0, 0, 0, 0, 0, 0]] * padding_length
-        
-        # Convert to tensors
-        input_ids = torch.tensor(input_ids, dtype=torch.long)
-        attention_mask = torch.tensor(attention_mask, dtype=torch.long)
-        bboxes = torch.tensor(token_bboxes, dtype=torch.float32)
+        input_ids += [self.tokenizer.pad_token_id] * padding_length
+        attention_mask += [0] * padding_length
+        bbox_tensors += [[0]*8] * padding_length
         
         return {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "bboxes": bboxes,
-            "image": image,
-            "words": words,
-            "labels": torch.tensor(annotation.get("labels", []), dtype=torch.long)
+            'pixel_values': pixel_values,
+            'input_ids': torch.tensor(input_ids),
+            'attention_mask': torch.tensor(attention_mask),
+            'bboxes': torch.tensor(bbox_tensors),
+            'label': torch.tensor(self.class_to_idx[sample['class_name']])
         }
-
-class FUNSDDataset(DocFormerDataset):
-    """Dataset for FUNSD form understanding task"""
-    def __getitem__(self, idx):
-        data = super().__getitem__(idx)
-        
-        # For FUNSD, we need to add entity labels
-        annotation = self.annotations[idx]
-        
-        # Align labels with tokens
-        labels = []
-        current_label = 0
-        for word, label in zip(annotation["words"], annotation["labels"]):
-            word_tokens = self.tokenizer.tokenize(word)
-            labels.extend([label] * len(word_tokens))
-        
-        # Truncate if needed
-        if len(labels) > self.max_seq_length - 2:
-            labels = labels[:self.max_seq_length - 2]
-        
-        # Add labels for [CLS] and [SEP]
-        labels = [0] + labels + [0]
-        
-        # Pad
-        padding_length = self.max_seq_length - len(labels)
-        labels = labels + [0] * padding_length
-        
-        data["labels"] = torch.tensor(labels, dtype=torch.long)
-        
-        return data
-
-class CORDDataset(DocFormerDataset):
-    """Dataset for CORD receipts dataset"""
-    def __getitem__(self, idx):
-        data = super().__getitem__(idx)
-        
-        # For CORD, we need to add receipt item labels
-        annotation = self.annotations[idx]
-        
-        # Align labels with tokens
-        labels = []
-        for word, label in zip(annotation["words"], annotation["labels"]):
-            word_tokens = self.tokenizer.tokenize(word)
-            labels.extend([label] * len(word_tokens))
-        
-        # Truncate if needed
-        if len(labels) > self.max_seq_length - 2:
-            labels = labels[:self.max_seq_length - 2]
-        
-        # Add labels for [CLS] and [SEP]
-        labels = [0] + labels + [0]
-        
-        # Pad
-        padding_length = self.max_seq_length - len(labels)
-        labels = labels + [0] * padding_length
-        
-        data["labels"] = torch.tensor(labels, dtype=torch.long)
-        
-        return data
 
 def collate_fn(batch):
-    """Collate function for DataLoader"""
-    pixel_values = torch.stack([item["image"] for item in batch])
-    input_ids = torch.stack([item["input_ids"] for item in batch])
-    attention_mask = torch.stack([item["attention_mask"] for item in batch])
-    bboxes = torch.stack([item["bboxes"] for item in batch])
-    
-    if "labels" in batch[0]:
-        labels = torch.stack([item["labels"] for item in batch])
-        return {
-            "pixel_values": pixel_values,
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "bboxes": bboxes,
-            "labels": labels
-        }
-    else:
-        return {
-            "pixel_values": pixel_values,
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "bboxes": bboxes
-        }
+    """Custom collate function for DataLoader"""
+    return {
+        'pixel_values': torch.stack([x['pixel_values'] for x in batch]),
+        'input_ids': torch.stack([x['input_ids'] for x in batch]),
+        'attention_mask': torch.stack([x['attention_mask'] for x in batch]),
+        'bboxes': torch.stack([x['bboxes'] for x in batch]),
+        'labels': torch.stack([x['label'] for x in batch])
+    }

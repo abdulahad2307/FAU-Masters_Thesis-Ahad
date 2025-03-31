@@ -1,106 +1,99 @@
 import argparse
-import os
-from datetime import datetime
-
 import torch
 from torch.utils.data import DataLoader
-
+from utils.docformer.dataset import RVLCDIPDataset, collate_fn
 from utils.docformer.model import DocFormer
-from utils.docformer.dataset import FUNSDDataset, CORDDataset, collate_fn
 from utils.docformer.trainer import DocFormerTrainer
-from src.config import DocFormerConfig
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="config.json", help="Path to config file")
-    parser.add_argument("--data_dir", type=str, required=True, help="Path to dataset directory")
-    parser.add_argument("--dataset", type=str, choices=["funsd", "cord"], required=True, help="Dataset to use")
-    parser.add_argument("--output_dir", type=str, default="outputs", help="Output directory")
-    parser.add_argument("--num_epochs", type=int, default=5, help="Number of training epochs")
-    parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
-    parser.add_argument("--learning_rate", type=float, default=2.5e-5, help="Learning rate")
-    parser.add_argument("--warmup_steps", type=int, default=1000, help="Number of warmup steps")
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", 
-                       help="Device to use (cuda or cpu)")
-    parser.add_argument("--resume", type=str, help="Path to checkpoint to resume from")
-    parser.add_argument("--eval_only", action="store_true", help="Only evaluate the model")
+    parser = argparse.ArgumentParser(description="DocFormer for RVL-CDIP Document Classification")
+    parser.add_argument('--data_dir', type=str, required=True, help='Path to dataset directory (should contain train/val/test subdirectories)')
+    parser.add_argument('--output_dir', type=str, default='outputs', help='Output directory for models and logs')
+    parser.add_argument('--batch_size', type=int, default=8, help='Batch size for training')
+    parser.add_argument('--num_epochs', type=int, default=50, help='Number of training epochs')
+    parser.add_argument('--learning_rate', type=float, default=2.5e-5, help='Learning rate')
+    parser.add_argument('--max_seq_length', type=int, default=512, help='Maximum sequence length for text')
+    parser.add_argument('--eval_only', action='store_true', help='Run evaluation only')
+    parser.add_argument('--resume', type=str, help='Path to model checkpoint to resume training or for evaluation')
     args = parser.parse_args()
-    
+
     # Create output directory
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = os.path.join(args.output_dir, f"{args.dataset}_{timestamp}")
-    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # Initialize datasets
+    train_dataset = RVLCDIPDataset(
+        data_dir=args.data_dir,
+        max_seq_length=args.max_seq_length,
+        split='train'
+    )
     
-    # Load config
-    if os.path.exists(args.config):
-        config = DocFormerConfig.from_json(args.config)
-    else:
-        config = DocFormerConfig()
-    
-    # Update config with command line arguments
-    config.num_train_epochs = args.num_epochs
-    config.batch_size = args.batch_size
-    config.learning_rate = args.learning_rate
-    config.warmup_steps = args.warmup_steps
-    
-    # Save config
-    config.to_json(os.path.join(output_dir, "config.json"))
-    
-    # Load dataset
-    if args.dataset == "funsd":
-        train_dataset = FUNSDDataset(args.data_dir, split="train")
-        eval_dataset = FUNSDDataset(args.data_dir, split="test")
-    elif args.dataset == "cord":
-        train_dataset = CORDDataset(args.data_dir, split="train")
-        eval_dataset = CORDDataset(args.data_dir, split="test")
-    
+    val_dataset = RVLCDIPDataset(
+        data_dir=args.data_dir,
+        max_seq_length=args.max_seq_length,
+        split='val'
+    )
+
+    # Initialize data loaders
     train_loader = DataLoader(
         train_dataset,
-        batch_size=config.batch_size,
+        batch_size=args.batch_size,
         shuffle=True,
+        num_workers=4,
         collate_fn=collate_fn
     )
     
-    eval_loader = DataLoader(
-        eval_dataset,
-        batch_size=config.batch_size,
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=args.batch_size,
         shuffle=False,
+        num_workers=4,
         collate_fn=collate_fn
     )
-    
-    # Initialize model
-    model = DocFormer(config)
-    
-    # Initialize trainer
-    trainer = DocFormerTrainer(model, config, args.device)
-    
-    # Resume from checkpoint if provided
-    start_epoch = 0
-    if args.resume:
-        start_epoch = trainer.load_checkpoint(args.resume)
-    
-    if args.eval_only:
-        eval_loss = trainer.evaluate(eval_loader)
-        print(f"Evaluation Loss: {eval_loss:.4f}")
-        return
-    
-    # Training loop
-    best_loss = float("inf")
-    for epoch in range(start_epoch, config.num_train_epochs):
-        train_loss = trainer.train_epoch(train_loader, epoch)
-        eval_loss = trainer.evaluate(eval_loader)
-        
-        print(f"Epoch {epoch + 1}/{config.num_train_epochs}")
-        print(f"Train Loss: {train_loss:.4f} | Eval Loss: {eval_loss:.4f}")
-        
-        # Save checkpoint
-        trainer.save_checkpoint(output_dir, epoch)
-        
-        if eval_loss < best_loss:
-            best_loss = eval_loss
-            trainer.save_checkpoint(output_dir, epoch, best=True)
-    
-    print(f"Training complete. Best evaluation loss: {best_loss:.4f}")
 
-if __name__ == "__main__":
+    # Initialize model
+    num_classes = len(train_dataset.class_to_idx)
+    model = DocFormer(num_classes=num_classes)
+
+    # Load checkpoint if resuming or evaluating
+    if args.resume:
+        checkpoint = torch.load(args.resume)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        print(f"Loaded model from {args.resume}")
+
+    # Evaluation only mode
+    if args.eval_only:
+        if not args.resume:
+            raise ValueError("Must provide --resume checkpoint for evaluation")
+        
+        trainer = DocFormerTrainer(
+            model=model,
+            train_loader=train_loader,  # Not used in eval
+            val_loader=val_loader,
+            device='cuda' if torch.cuda.is_available() else 'cpu'
+        )
+        
+        val_loss, val_acc = trainer.validate()
+        print(f"Validation Results - Loss: {val_loss:.4f}, Accuracy: {val_acc:.4f}")
+        return
+
+    # Training mode
+    trainer = DocFormerTrainer(
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        device='cuda' if torch.cuda.is_available() else 'cpu',
+        num_epochs=args.num_epochs,
+        learning_rate=args.learning_rate
+    )
+
+    # Start training
+    trainer.train()
+
+    # Save final model
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'class_to_idx': train_dataset.class_to_idx
+    }, os.path.join(args.output_dir, 'final_model.pt'))
+
+if __name__ == '__main__':
     main()
