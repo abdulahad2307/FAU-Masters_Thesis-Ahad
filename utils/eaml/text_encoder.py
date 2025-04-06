@@ -15,11 +15,17 @@ class TextEncoder(nn.Module):
         self.tokenizer = BertTokenizer.from_pretrained(model_name)
         self.bert = BertModel.from_pretrained(model_name)
         self.fc = nn.Linear(self.bert.config.hidden_size, embed_dim)
+        
+        # Freeze BERT layers
+        for param in self.bert.parameters():
+            param.requires_grad = False
 
     def forward(self, text):
-        tokens = self.tokenizer(text, padding=True, truncation=True, return_tensors="pt")
-        #output = self.bert(**tokens).last_hidden_state[:, 0, :]
-        tokens = {key: val.to(next(self.bert.parameters()).device) for key, val in tokens.items()}  # Ensure tensors match BERT's device
-        output = self.bert(**tokens).last_hidden_state[:, 0, :]
-
-        return self.fc(output)
+        if isinstance(text, str):
+            text = self.tokenizer(text, return_tensors="pt")
+        
+        text = {key: val.to(next(self.bert.parameters()).device) 
+               for key, val in text.items()}
+        
+        outputs = self.bert(**text)
+        return self.fc(outputs.last_hidden_state[:, 0, :])

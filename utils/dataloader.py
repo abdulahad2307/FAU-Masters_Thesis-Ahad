@@ -1,15 +1,14 @@
+# utils/dataloader.py
 import os
 import argparse
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader as TorchDataLoader, Dataset
 from torchvision.datasets import ImageFolder
-from transformers import BertTokenizer
+from transformers import BertTokenizer, TrOCRProcessor, VisionEncoderDecoderModel
 from PIL import Image
-import pytesseract  # OCR for extracting text from images
 import torch
-
-# Load the BERT tokenizer
-tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+import json
+from typing import Optional, Union, List, Dict
 
 class EAML_Dataset(Dataset):
     def __init__(self, data_dir, transform=None):
@@ -17,58 +16,52 @@ class EAML_Dataset(Dataset):
         self.transform = transform
         self.image_paths = []
         self.texts = []
-        self.labels = []  # Stores class labels
-
+        self.labels = []
+        
+        # Initialize OCR components
+        self.ocr_processor = TrOCRProcessor.from_pretrained("microsoft/trocr-base-handwritten", use_fast=True)
+        self.ocr_model = VisionEncoderDecoderModel.from_pretrained("microsoft/trocr-base-handwritten")
+        self.tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+        
         self.load_samples()
 
-    def extract_text_from_image(self, img_path, txt_path):
-        """
-        Extract text from an image using Tesseract OCR and save it as a text file.
-        """
-        image = Image.open(img_path).convert("RGB")
-        extracted_text = pytesseract.image_to_string(image).strip()
-
-        if not extracted_text:
-            extracted_text = "No Text"  # Handle cases where OCR fails
-
-        # Save extracted text to a .txt file
-        with open(txt_path, "w", encoding="utf-8") as txt_file:
-            txt_file.write(extracted_text)
-
-        return extracted_text
+    def extract_text_from_image(self, image):
+        """Use TROCR for text extraction instead of Tesseract"""
+        pixel_values = self.ocr_processor(image, return_tensors="pt").pixel_values
+        with torch.no_grad():
+            generated_ids = self.ocr_model.generate(pixel_values)
+        return self.ocr_processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
 
     def load_samples(self):
-        """
-        Load image paths, extract text (if missing), and prepare dataset.
-        """
+        """Modified to use TROCR directly without text files"""
         print(f"📂 Scanning dataset directory: {self.data_dir}")
-
         num_files = 0
+        
         for root, _, files in os.walk(self.data_dir):
             for img_file in files:
-                if img_file.endswith(".tif"):
+                if img_file.endswith((".tif", ".png", ".jpg", ".jpeg")):
                     img_path = os.path.join(root, img_file)
-                    txt_path = img_path.replace(".tif", ".txt")
-                    label = os.path.basename(root)  # Folder name as label
-
+                    label = os.path.basename(root)
                     num_files += 1
-
-                    # If text file does not exist, extract text using OCR
-                    if not os.path.exists(txt_path):
-                        print(f"⚠️ No text file found for {img_file}, extracting text...")
-                        extracted_text = self.extract_text_from_image(img_path, txt_path)
-                    else:
-                        with open(txt_path, "r", encoding="utf-8") as file:
-                            extracted_text = file.read().strip()
-
-                    # Convert text to tokenized format
-                    tokenized_text = tokenizer(extracted_text, padding="max_length", truncation=True, max_length=128, return_tensors="pt")
-
+                    
+                    # Process image and extract text
+                    image = Image.open(img_path).convert("RGB")
+                    extracted_text = self.extract_text_from_image(image)
+                    
+                    # Tokenize text
+                    tokenized_text = self.tokenizer(
+                        extracted_text, 
+                        padding="max_length", 
+                        truncation=True, 
+                        max_length=128, 
+                        return_tensors="pt"
+                    )
+                    
                     self.image_paths.append(img_path)
                     self.texts.append(tokenized_text)
                     self.labels.append(label)
-
-        print(f"✅ Found {num_files} images, Loaded {len(self.image_paths)} valid samples from {self.data_dir}")
+        
+        print(f"✅ Found {num_files} images, Loaded {len(self.image_paths)} samples")
 
     def __len__(self):
         return len(self.image_paths)
@@ -77,84 +70,137 @@ class EAML_Dataset(Dataset):
         image = Image.open(self.image_paths[idx]).convert("RGB")
         if self.transform:
             image = self.transform(image)
+        return image, self.texts[idx], self.labels[idx]
 
-        text = self.texts[idx]
-        label = self.labels[idx]  # Returning label as well
+class DocFormerDataset(Dataset):
+    """DocFormer-compatible dataset (unchanged from your version)"""
+    def __init__(self, data_dir, tokenizer_name="bert-base-uncased", max_seq_length=512, split="train"):
+        self.data_dir = os.path.join(data_dir, split)
+        self.tokenizer = BertTokenizer.from_pretrained(tokenizer_name)
+        self.max_seq_length = max_seq_length
+        self.split = split
+        
+        self.samples = []
+        self.class_names = []
+        self._load_samples()
+        
+        self.class_to_idx = {cls_name: idx for idx, cls_name in enumerate(sorted(set(self.class_names)))}
+        self.idx_to_class = {idx: cls_name for cls_name, idx in self.class_to_idx.items()}
+        
+        self.transform = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                               std=[0.229, 0.224, 0.225])
+        ])
 
-        return image, text, label  # Ensures all three components are returned
+    def _load_samples(self):
+        for class_name in os.listdir(self.data_dir):
+            class_dir = os.path.join(self.data_dir, class_name)
+            if os.path.isdir(class_dir):
+                for img_file in os.listdir(class_dir):
+                    if img_file.lower().endswith(('.tif', '.png', '.jpg', '.jpeg')):
+                        self.samples.append({
+                            'image_path': os.path.join(class_dir, img_file),
+                            'class_name': class_name
+                        })
+                        self.class_names.append(class_name)
 
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        sample = self.samples[idx]
+        image = Image.open(sample['image_path']).convert('RGB')
+        pixel_values = self.transform(image)
+        
+        input_ids = torch.tensor([self.tokenizer.cls_token_id] + 
+                               [self.tokenizer.pad_token_id] * (self.max_seq_length - 2) +
+                               [self.tokenizer.sep_token_id])[:self.max_seq_length]
+        
+        attention_mask = torch.tensor([1] + [0] * (self.max_seq_length - 2) + [1])[:self.max_seq_length]
+        
+        bboxes = torch.tensor([[0, 0, image.width, 0, image.width, image.height, 0, image.height]] * self.max_seq_length)
+        
+        return {
+            'pixel_values': pixel_values,
+            'input_ids': input_ids,
+            'attention_mask': attention_mask,
+            'bboxes': bboxes,
+            'label': torch.tensor(self.class_to_idx[sample['class_name']])
+        }
 
 class DataLoader:
-    def __init__(self, data_dir, batch_size=32, num_workers=4, img_size=224, dataset_type="all", classes=None, use_eaml=False):
-        """
-        Initializing the dataset loader.
-
-        Parameters:
-        data_dir: Path to the organized dataset directory.
-        batch_size: Number of samples per batch.
-        num_workers: Number of worker threads for data loading.
-        img_size: Image size (for resizing).
-        dataset_type: One of ['train', 'val', 'test', 'all'].
-        classes: List of specific classes to load (default: all classes).
-        use_eaml: If True, use the EAML dataset with image + text.
-        """
+    def __init__(self, data_dir, batch_size=32, num_workers=4, img_size=224, 
+                 dataset_type="all", classes=None, use_eaml=False, use_docformer=False):
+        if use_eaml and use_docformer:
+            raise ValueError("Cannot use both EAML and DocFormer modes simultaneously")
+            
         self.data_dir = data_dir
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.img_size = img_size
         self.dataset_type = dataset_type
         self.classes = classes
-        self.use_eaml = use_eaml  # Flag to determine dataset type
+        self.use_eaml = use_eaml
+        self.use_docformer = use_docformer
 
-        # Define transformations
+        # Configure transforms
         self.transform = transforms.Compose([
-            transforms.Resize((self.img_size, self.img_size)),
+            transforms.Resize((img_size, img_size)),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5], std=[0.5])
+            transforms.Normalize(
+                mean=[0.485, 0.456, 0.406] if use_docformer else [0.5], 
+                std=[0.229, 0.224, 0.225] if use_docformer else [0.5]
+            )
         ])
-
-        # Load datasets
-        self.train_dataset = self.load_dataset("train")
-        self.val_dataset = self.load_dataset("val")
-        self.test_dataset = self.load_dataset("test")
-
-    def eaml_load_dataset(self, dataset_type):
-        """
-        Custom function to load EAML datasets separately.
-        """
-        dataset_path = os.path.join(self.data_dir, dataset_type)
-
-        if not os.path.exists(dataset_path):
-            raise ValueError(f"❌ Error: EAML dataset directory does not exist: {dataset_path}")
-
-        dataset = EAML_Dataset(dataset_path, transform=self.transform)
-
-        print(f"✅ Loaded EAML dataset, Found {len(dataset)} samples.")
-
-        return dataset
 
     def load_dataset(self, dataset_type):
         dataset_path = os.path.join(self.data_dir, dataset_type)
-
         if not os.path.exists(dataset_path):
-            raise ValueError(f"❌ Error: {dataset_type} directory does not exist: {dataset_path}")
+            raise ValueError(f"Dataset directory does not exist: {dataset_path}")
 
         if self.use_eaml:
-            dataset = self.eaml_load_dataset(dataset_type)
+            return EAML_Dataset(dataset_path, transform=self.transform)
+        elif self.use_docformer:
+            return DocFormerDataset(
+                data_dir=self.data_dir,
+                split=dataset_type,
+                max_seq_length=512
+            )
         else:
-            dataset = ImageFolder(root=dataset_path, transform=self.transform)
-
-        print(f"✅ Loaded dataset: {dataset_type}, Found {len(dataset)} samples before filtering.")
-
-        return dataset
+            return ImageFolder(root=dataset_path, transform=self.transform)
 
     def get_data_loader(self, dataset_type):
-        """Returns DataLoader object for the specified dataset type (train, val, test)."""
-        dataset = self.train_dataset if dataset_type == "train" else self.val_dataset if dataset_type == "val" else self.test_dataset
-        return TorchDataLoader(dataset, batch_size=self.batch_size, shuffle=(dataset_type == "train"), num_workers=self.num_workers)
+        dataset = self.load_dataset(dataset_type)
+        
+        if self.use_docformer:
+            return TorchDataLoader(
+                dataset,
+                batch_size=self.batch_size,
+                shuffle=(dataset_type == "train"),
+                num_workers=self.num_workers,
+                collate_fn=self.docformer_collate_fn
+            )
+        else:
+            return TorchDataLoader(
+                dataset,
+                batch_size=self.batch_size,
+                shuffle=(dataset_type == "train"),
+                num_workers=self.num_workers
+            )
+
+    @staticmethod
+    def docformer_collate_fn(batch):
+        return {
+            'pixel_values': torch.stack([x['pixel_values'] for x in batch]),
+            'input_ids': torch.stack([x['input_ids'] for x in batch]),
+            'attention_mask': torch.stack([x['attention_mask'] for x in batch]),
+            'bboxes': torch.stack([x['bboxes'] for x in batch]),
+            'labels': torch.stack([x['label'] for x in batch])
+        }
 
     def load_data(self):
-        """Loads train, val, test, or all data based on dataset_type."""
         loaders = {}
         if self.dataset_type in ["train", "all"]:
             loaders["train"] = self.get_data_loader("train")
@@ -162,35 +208,20 @@ class DataLoader:
             loaders["val"] = self.get_data_loader("val")
         if self.dataset_type in ["test", "all"]:
             loaders["test"] = self.get_data_loader("test")
-
         return loaders
 
-
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Custom DataLoader for Document Classification")
-    parser.add_argument("--data_dir", type=str, required=True, help="Path to dataset directory")
-    parser.add_argument("--batch_size", type=int, default=32, help="Batch size for DataLoader")
-    parser.add_argument("--num_workers", type=int, default=4, help="Number of worker threads for data loading")
-    parser.add_argument("--img_size", type=int, default=224, help="Image size for resizing")
-    parser.add_argument("--dataset_type", type=str, choices=["train", "val", "test", "all"], default="all",
-                        help="Dataset split to load (train, val, test, or all)")
-    parser.add_argument("--classes", nargs="+", default=None, help="List of class names to load (default: all classes)")
-    parser.add_argument("--use_eaml", action="store_true", help="Enable EAML dataset (image + text pairs)")
-
+    parser = argparse.ArgumentParser(description="Unified DataLoader for EAML and DocFormer")
+    parser.add_argument("--data_dir", type=str, required=True)
+    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--img_size", type=int, default=224)
+    parser.add_argument("--dataset_type", type=str, default="all")
+    parser.add_argument("--use_eaml", action="store_true")
+    parser.add_argument("--use_docformer", action="store_true")
+    
     args = parser.parse_args()
-
-    if isinstance(args.classes, str):
-        args.classes = [c.strip() for c in args.classes.split(",")]
-
-    loader = DataLoader(
-        data_dir=args.data_dir,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        img_size=args.img_size,
-        dataset_type=args.dataset_type,
-        classes=args.classes,
-        use_eaml=args.use_eaml
-    )
-
+    
+    loader = DataLoader(**vars(args))
     data_loaders = loader.load_data()
-    print(f"✅ Data Loaders initialized for: {list(data_loaders.keys())}")
+    print(f"Initialized loaders for: {list(data_loaders.keys())}")
