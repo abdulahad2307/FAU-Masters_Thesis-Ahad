@@ -9,7 +9,6 @@
 #SBATCH --cpus-per-task=4                 # Increased CPU cores for OCR processing
 #SBATCH --gres=gpu:v100:1                 # Number of GPUs
 #SBATCH --time=23:30:00                   # Time limit hrs:min:sec
-#SBATCH --mem=16G                         # Memory allocation
 #SBATCH --export=NONE                     # Avoid inheriting unwanted environment variables
 
 unset SLURM_EXPORT_ENV
@@ -17,7 +16,7 @@ unset SLURM_EXPORT_ENV
 # Load required modules
 module load cuda/12.6
 module load python/3.12-conda
-module load tesseract/5.3.3  # Required for OCR processing
+#module load tesseract/5.3.3  # Required for OCR processing
 conda activate mtil
 
 export http_proxy=http://proxy:80
@@ -53,4 +52,4 @@ echo "DocFormer Training Completed."
 #     --resume outputs/funsd/best_model.pt
 # echo "DocFormer Evaluation Completed."
 
-# To submit: sbatch run_docformer.sh
+# sbatch run_docformermodel.sh
