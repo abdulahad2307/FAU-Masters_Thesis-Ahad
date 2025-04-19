@@ -40,9 +40,16 @@ def create_subset(data_dir,out_dir, subset_name="subset", subset_size_per_class=
             images = [f for f in os.listdir(original_class_path) 
                      if f.endswith('.tif')]
             
-            # If there are fewer images than requested, take all
-            sample_size = min(subset_size_per_class, len(images))
-            
+            if split == 'train':
+                subset_size_per_class=140
+                # If there are fewer images than requested, take all
+                sample_size = min(subset_size_per_class, len(images))
+            elif split == 'val':
+                subset_size_per_class=40
+                sample_size = min(subset_size_per_class, len(images))
+            elif split == 'test':
+                subset_size_per_class=20
+                sample_size = min(subset_size_per_class, len(images))
             # Randomly selecting images
             selected_images = random.sample(images, sample_size)
             
