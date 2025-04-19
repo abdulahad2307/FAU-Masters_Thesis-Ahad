@@ -6,19 +6,24 @@ from torch.utils.data import DataLoader
 from utils.dataloader import EAML_Dataset
 from utils.eaml.eaml_model import EAMLModel
 from tqdm import tqdm
+import warnings
+
+# Suppress the specific transformers warnings
+warnings.filterwarnings("ignore", message="Config of the encoder.*")
+warnings.filterwarnings("ignore", message="Config of the decoder.*")
+warnings.filterwarnings("ignore", message="Some weights of.*")
 
 def collate_fn(batch):
-    images = torch.stack([item["image"] for item in batch])
+    images = torch.stack([item[0] for item in batch])  # images are first element
     texts = {
-        "input_ids": torch.stack([item["text"]["input_ids"].squeeze() for item in batch]),
-        "attention_mask": torch.stack([item["text"]["attention_mask"].squeeze() for item in batch])
+        "input_ids": torch.stack([item[1]["input_ids"].squeeze(0) for item in batch]),
+        "attention_mask": torch.stack([item[1]["attention_mask"].squeeze(0) for item in batch])
     }
-    labels = torch.tensor([item["label"] for item in batch])
+    labels = torch.tensor([item[2] for item in batch])  # labels are third element
     return images, texts, labels
 
 def train(model, dataloader, optimizer, criterion, device, epochs):
     model.to(device)
-    model.ocr_model.to(device)
     
     for epoch in range(epochs):
         model.train()
@@ -54,8 +59,14 @@ def main():
     parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
-    parser.add_argument("--device", default="cuda", help="Device to use (cuda/cpu)")
+    parser.add_argument("--device", default="cuda", help="Device to use (must be 'cuda')")
     args = parser.parse_args()
+
+    # ==== Enforce GPU-only training ====
+    if args.device != "cuda" or not torch.cuda.is_available():
+        raise RuntimeError("CUDA (GPU) is required but not available. Check your PyTorch installation and GPU drivers.")
+
+    print(f"Training on GPU: {torch.cuda.get_device_name(0)}")
 
     # Initialize dataset and model
     dataset = EAML_Dataset(os.path.join(args.data_dir, "train"))

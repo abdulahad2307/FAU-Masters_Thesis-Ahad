@@ -24,20 +24,17 @@ export https_proxy=http://proxy:80
 # Move to the repository folder
 export PYTHONPATH=$PYTHONPATH:$(pwd)/FAU-Masters_Thesis-Ahad
 
-# Define custom class list
-CUSTOM_CLASSES=("letter" "form" "email" "handwritten" "advertisement" "scientific report" "invoice" "presentation" "questionnaire" "resume" "memo")
-
 echo "Starting EAML Model Training..."
 
 # Run Model Training
 export CUDA_LAUNCH_BLOCKING=1
 python3 src/sota_eaml_model.py \
     --data_dir /home/woody/iwi5/iwi5280h/dataset/prepdata \
-    --epochs 50 \
+    --epochs 5 \
     --batch_size 64 \
     --lr 0.001 \
-    --device cuda #\
-    #--classes "${CUSTOM_CLASSES[@]}"
+    --device cuda \
+    --classes "letter" "form" "email" "handwritten" "advertisement" "scientific report" "invoice" "presentation" "resume" "memo"
 
 echo "EAML Training Completed. Check logs/training_log.csv for results."
 
