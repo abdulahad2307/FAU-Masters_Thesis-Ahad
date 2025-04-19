@@ -1,14 +1,19 @@
 import os
 import torch
-from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import AdamW, get_linear_schedule_with_warmup
+from torch.optim import AdamW
 
 class DocFormerTrainer:
     def __init__(self, model, config, device):
         self.model = model.to(device)
         self.config = config
         self.device = device
+        
+        # Define loss functions
+        self.mm_mlm_loss_fn = torch.nn.CrossEntropyLoss()  # For pretraining tasks
+        self.ltr_loss_fn = torch.nn.SmoothL1Loss()
+        self.tdi_loss_fn = torch.nn.BCEWithLogitsLoss()
+        self.classification_loss_fn = torch.nn.CrossEntropyLoss()  # For classification
         
         # Optimizer
         no_decay = ["bias", "LayerNorm.weight"]
@@ -96,43 +101,34 @@ class DocFormerTrainer:
     def evaluate(self, eval_loader):
         self.model.eval()
         total_loss = 0.0
+        total_correct = 0
+        total_samples = 0
         
         with torch.no_grad():
             for batch in tqdm(eval_loader, desc="Evaluating"):
                 batch = {k: v.to(self.device) for k, v in batch.items()}
                 
+                # Forward pass for classification
                 outputs = self.model(
                     input_ids=batch["input_ids"],
                     bboxes=batch["bboxes"],
                     attention_mask=batch["attention_mask"],
                     pixel_values=batch["pixel_values"],
-                    task="pretrain"
+                    task="classification"  # Make sure your model supports this
                 )
                 
-                # Calculate losses
-                mm_mlm_loss = self.mm_mlm_loss_fn(
-                    outputs["mm_mlm_logits"].view(-1, self.model.text_embeddings.config.vocab_size),
-                    batch["input_ids"].view(-1)
-                )
-                
-                ltr_loss = self.ltr_loss_fn(
-                    outputs["ltr_output"],
-                    batch["pixel_values"]
-                )
-                
-                tdi_labels = torch.ones(batch["input_ids"].size(0), dtype=torch.float32, device=self.device)
-                tdi_loss = self.tdi_loss_fn(
-                    outputs["tdi_logits"].squeeze(),
-                    tdi_labels
-                )
-                
-                loss = (self.config.mm_mlm_weight * mm_mlm_loss + 
-                        self.config.ltr_weight * ltr_loss + 
-                        self.config.tdi_weight * tdi_loss)
-                
+                # Calculate loss and accuracy
+                loss = self.classification_loss_fn(outputs["logits"], batch["labels"])
                 total_loss += loss.item()
+                
+                _, predicted = torch.max(outputs["logits"], 1)
+                total_correct += (predicted == batch["labels"]).sum().item()
+                total_samples += batch["labels"].size(0)
         
-        return total_loss / len(eval_loader)
+        avg_loss = total_loss / len(eval_loader)
+        accuracy = 100.0 * total_correct / total_samples
+        
+        return avg_loss, accuracy
     
     def save_checkpoint(self, path, epoch, best=False):
         checkpoint = {

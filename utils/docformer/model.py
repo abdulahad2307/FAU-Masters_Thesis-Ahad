@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
-from transformers import BertModel, BertConfig
+import math
+from transformers import LayoutLMModel, LayoutLMConfig
 from torchvision.models import resnet50
 
 class SpatialEmbeddings(nn.Module):
@@ -26,29 +27,44 @@ class SpatialEmbeddings(nn.Module):
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
     
     def forward(self, bboxes):
-        # bboxes shape: (batch_size, seq_len, 8) - 8 coordinates for quadrilateral
+        # Ensure bboxes are float32 type and normalized [0,1]
+        bboxes = bboxes.float()
         batch_size, seq_len = bboxes.shape[:2]
         
         # Extract coordinates
         x1, y1, x2, y2, x3, y3, x4, y4 = bboxes.unbind(-1)
         
-        # Calculate width and height
-        width = (x2 - x1).unsqueeze(-1)  # (batch_size, seq_len, 1)
-        height = (y3 - y1).unsqueeze(-1)  # (batch_size, seq_len, 1)
+        # Normalize coordinates to be within embedding range [0, max_position_embeddings-1]
+        def safe_normalize(coords):
+            coords = torch.clamp(coords, 0, 1)  # Ensure within [0,1]
+            normalized = (coords * (self.config.max_position_embeddings - 1)).long()
+            return torch.clamp(normalized, 0, self.config.max_position_embeddings - 1)
+        
+        x1_norm = safe_normalize(x1)
+        y1_norm = safe_normalize(y1)
+        x2_norm = safe_normalize(x2)
+        y2_norm = safe_normalize(y2)
+        
+        # Calculate normalized width and height (ensure float32)
+        width = (x2 - x1).unsqueeze(-1).float()
+        height = (y3 - y1).unsqueeze(-1).float()
         
         # Absolute position embeddings
-        x1_emb = self.x_embeddings(x1.long())
-        y1_emb = self.y_embeddings(y1.long())
-        x2_emb = self.x_embeddings(x2.long())
-        y2_emb = self.y_embeddings(y2.long())
+        x1_emb = self.x_embeddings(x1_norm)
+        y1_emb = self.y_embeddings(y1_norm)
+        x2_emb = self.x_embeddings(x2_norm)
+        y2_emb = self.y_embeddings(y2_norm)
         
         # Size embeddings
         width_emb = self.width_embeddings(width)
         height_emb = self.height_embeddings(height)
         
-        # Relative position embeddings between top-left and bottom-right
-        rel_x = (x2 - x1).long() + self.config.max_position_embeddings
-        rel_y = (y2 - y1).long() + self.config.max_position_embeddings
+        # Relative position embeddings with safe bounds
+        rel_x = (x2_norm - x1_norm) + self.config.max_position_embeddings
+        rel_y = (y2_norm - y1_norm) + self.config.max_position_embeddings
+        rel_x = torch.clamp(rel_x, 0, 2 * self.config.max_position_embeddings - 1)
+        rel_y = torch.clamp(rel_y, 0, 2 * self.config.max_position_embeddings - 1)
+        
         rel_x_emb = self.rel_x_embeddings(rel_x)
         rel_y_emb = self.rel_y_embeddings(rel_y)
         
@@ -67,7 +83,7 @@ class VisualBackbone(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        resnet = resnet50(pretrained=False)
+        resnet = resnet50(weights='IMAGENET1K_V2')  # Updated to use weights parameter
         
         # Remove the last two layers (avgpool and fc)
         self.backbone = nn.Sequential(*list(resnet.children())[:-2])
@@ -81,7 +97,7 @@ class VisualBackbone(nn.Module):
         
         # Adaptive pooling to fixed size
         self.pool = nn.AdaptiveAvgPool2d((16, 16))
-    
+        
     def forward(self, pixel_values):
         # pixel_values shape: (batch_size, 3, height, width)
         features = self.backbone(pixel_values)  # (batch_size, 2048, h/32, w/32)
@@ -113,7 +129,8 @@ class MultiModalSelfAttention(nn.Module):
         self.spatial_key = nn.Linear(config.hidden_size, self.all_head_size)
         
         # Relative position bias
-        self.rel_pos_bias = nn.Embedding(2 * config.max_position_embeddings, self.num_attention_heads)
+        max_rel_pos = 2 * config.max_position_embeddings - 1
+        self.rel_pos_bias = nn.Embedding(max_rel_pos, self.num_attention_heads)
         
         # Dropout
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
@@ -152,7 +169,8 @@ class MultiModalSelfAttention(nn.Module):
         seq_length = hidden_states.size(1)
         position_ids = torch.arange(seq_length, dtype=torch.long, device=hidden_states.device)
         rel_pos = position_ids.unsqueeze(1) - position_ids.unsqueeze(0)
-        rel_pos += self.config.max_position_embeddings
+        rel_pos += self.config.max_position_embeddings - 1  # Center around 0
+        rel_pos = torch.clamp(rel_pos, 0, 2 * self.config.max_position_embeddings - 2)
         rel_pos_bias = self.rel_pos_bias(rel_pos).permute(2, 0, 1)
         
         # Combine attention scores
@@ -189,7 +207,11 @@ class DocFormerLayer(nn.Module):
     
     def forward(self, hidden_states, spatial_embeddings, attention_mask=None):
         # Self-attention
-        attention_output = self.attention(hidden_states, spatial_embeddings, attention_mask)
+        attention_output = self.attention(
+            hidden_states=hidden_states,
+            spatial_embeddings=spatial_embeddings,
+            attention_mask=attention_mask
+        )
         
         # Intermediate and output
         intermediate_output = self.intermediate(attention_output)
@@ -212,13 +234,17 @@ class DocFormerEncoder(nn.Module):
         return hidden_states
 
 class DocFormer(nn.Module):
-    """Complete DocFormer model"""
-    def __init__(self, config):
+    """Complete DocFormer model with classification support"""
+    def __init__(self, config, num_classes=None):
         super().__init__()
         self.config = config
         
-        # Text embeddings (initialized from LayoutLMv1)
-        self.text_embeddings = BertModel.from_pretrained("microsoft/layoutlm-base-uncased")
+        # Initialize LayoutLM model
+        layoutlm_config = LayoutLMConfig.from_pretrained("microsoft/layoutlm-base-uncased")
+        self.text_embeddings = LayoutLMModel.from_pretrained(
+            "microsoft/layoutlm-base-uncased",
+            config=layoutlm_config
+        )
         
         # Visual backbone
         self.visual_backbone = VisualBackbone(config)
@@ -230,7 +256,7 @@ class DocFormer(nn.Module):
         self.encoder = DocFormerEncoder(config)
         
         # Pre-training heads
-        self.mm_mlm_head = nn.Linear(config.hidden_size, self.text_embeddings.config.vocab_size)
+        self.mm_mlm_head = nn.Linear(config.hidden_size, layoutlm_config.vocab_size)
         self.ltr_head = nn.Sequential(
             nn.Linear(config.hidden_size, config.hidden_size),
             nn.ReLU(),
@@ -238,9 +264,14 @@ class DocFormer(nn.Module):
         )
         self.tdi_head = nn.Linear(config.hidden_size, 1)
         
-        # Initialize weights
+        # Classification head (only initialized if num_classes is provided)
+        if num_classes is not None:
+            self.classifier = nn.Linear(config.hidden_size, num_classes)
+        else:
+            self.classifier = None
+        
         self.init_weights()
-    
+
     def init_weights(self):
         """Initialize weights"""
         # Initialize visual backbone
@@ -258,8 +289,8 @@ class DocFormer(nn.Module):
                 module.weight.data.fill_(1.0)
         
         # Initialize pre-training heads
-        self.mm_mlm_head.weight.data = self.text_embeddings.cls.predictions.decoder.weight.data
-        self.mm_mlm_head.bias.data = self.text_embeddings.cls.predictions.decoder.bias.data
+        self.mm_mlm_head.weight.data = self.text_embeddings.embeddings.word_embeddings.weight.data
+        self.mm_mlm_head.bias.data = torch.zeros_like(self.mm_mlm_head.bias.data)
         
         for module in self.ltr_head.modules():
             if isinstance(module, nn.Linear):
@@ -269,7 +300,13 @@ class DocFormer(nn.Module):
         
         self.tdi_head.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
         self.tdi_head.bias.data.zero_()
-    
+        
+        # Initialize classifier if it exists
+        if self.classifier is not None:
+            nn.init.xavier_uniform_(self.classifier.weight)
+            if self.classifier.bias is not None:
+                self.classifier.bias.data.zero_()
+
     def forward(
         self,
         input_ids=None,
@@ -325,8 +362,16 @@ class DocFormer(nn.Module):
                 "ltr_output": ltr_output,
                 "tdi_logits": tdi_logits
             }
+        elif task == "classification" and self.classifier is not None:
+            # Classification task - use [CLS] token representation
+            cls_output = encoder_outputs[:, 0]  # First token is [CLS]
+            logits = self.classifier(cls_output)
+            return {
+                "logits": logits,
+                "last_hidden_state": encoder_outputs
+            }
         else:
-            # For downstream tasks, return the encoder outputs
+            # For other downstream tasks, return the encoder outputs
             return {
                 "last_hidden_state": encoder_outputs,
                 "text_features": encoder_outputs[:, :text_features.size(1)],

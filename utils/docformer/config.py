@@ -12,6 +12,7 @@ class DocFormerConfig:
     hidden_dropout_prob: float = 0.1
     attention_probs_dropout_prob: float = 0.1
     max_position_embeddings: int = 512
+    initializer_range: float = 0.02  # Added this parameter
     
     # Visual backbone
     visual_backbone: str = "resnet50"
