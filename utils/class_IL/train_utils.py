@@ -3,7 +3,7 @@ import os
 from tqdm import tqdm
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 
-#Fine-tuning modes
+#Fine-tuning IL modes
 def set_finetune_mode(model, mode="head_only", encoder_unfreeze_depth=1):
     if mode == "head_only":
         for param in model.parameters():
@@ -40,7 +40,6 @@ def create_optimizer(model, base_lr=1e-4, head_lr=1e-3):
         {'params': head_params, 'lr': head_lr}
     ])
 
-#Save/Load Checkpoints
 def save_checkpoint(model, optimizer, epoch, stage_id, path):
     torch.save({
         'epoch': epoch,
@@ -58,13 +57,11 @@ def load_checkpoint(model, optimizer, path, device):
     print(f"Loaded checkpoint: {path} | Resuming from epoch {checkpoint['epoch']+1}")
     return checkpoint['epoch'] + 1
 
-# Metrics
 def compute_metrics(y_true, y_pred):
     acc = accuracy_score(y_true, y_pred)
     prec, rec, f1, _ = precision_recall_fscore_support(y_true, y_pred, average='weighted', zero_division=0)
     return acc, prec, rec, f1
 
-#Train One Epoch — generalized for EAML/DocFormer
 def train_one_epoch(model, dataloader, optimizer, criterion, device):
     model.train()
     total_loss, all_preds, all_labels = 0, [], []

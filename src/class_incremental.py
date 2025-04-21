@@ -66,13 +66,13 @@ def run_incremental_learning(
             val_acc = evaluate(model, val_loader, DEVICE)
 
             epoch_time = time.time() - start_time
-            print(f"Epoch Time: {epoch_time:.2f}s | 🔍 Val Acc: {val_acc:.4f}")
+            print(f"Epoch Time: {epoch_time:.2f}s | Val Acc: {val_acc:.4f}")
 
             save_checkpoint(model, optimizer, epoch + 1, ckpt_path)
 
         print(f"Finished Training Step {step+1}. Now Evaluating on TEST Set...")
         test_acc = evaluate(model, test_loader, DEVICE)
-        print(f"📊 Step {step+1} Test Accuracy: {test_acc:.4f}")
+        print(f"Step {step+1} Test Accuracy: {test_acc:.4f}")
 
 if __name__ == "__main__":
     # Define order of classes for class-IL

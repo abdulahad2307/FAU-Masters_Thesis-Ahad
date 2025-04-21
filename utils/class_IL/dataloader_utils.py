@@ -56,7 +56,7 @@ class EAMLClassILDataset(Dataset):
                         )
                         self.samples.append((img_path, tokens, class_name))
                     except Exception as e:
-                        print(f"⚠️ Skipping {img_path} due to: {e}")
+                        print(f"Skipping {img_path} due to: {e}")
 
     def __len__(self): return len(self.samples)
 
