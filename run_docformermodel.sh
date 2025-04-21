@@ -29,13 +29,14 @@ echo "Starting DocFormer Training..."
 # Training command with class specification
 export CUDA_LAUNCH_BLOCKING=1
 python src/sota_docformer_model.py \
-    --data_dir /home/woody/iwi5/iwi5280h/dataset/prepdata \
+    --data_dir /home/woody/iwi5/iwi5280h/dataset/small_dataset \
     --output_dir outputs/funsd \
     --batch_size 8 \
-    --num_epochs 5 \
-    --learning_rate 2.5e-5 \
+    --num_epochs 100 \
+    --learning_rate 1e-3 \
     --classes "letter,form,email,handwritten,advertisement,scientific report,invoice,resume"
 
 echo "DocFormer Training Completed."
 
 # sbatch run_docformermodel.sh
+#--data_dir /home/woody/iwi5/iwi5280h/dataset/prepdata \

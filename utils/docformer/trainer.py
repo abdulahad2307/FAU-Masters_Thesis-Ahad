@@ -139,9 +139,9 @@ class DocFormerTrainer:
         }
         
         if best:
-            torch.save(checkpoint, os.path.join(path, "best_model.pt"))
+            torch.save(checkpoint, os.path.join(path, "docformer_best_model.pt"))
         else:
-            torch.save(checkpoint, os.path.join(path, f"checkpoint_epoch_{epoch}.pt"))
+            torch.save(checkpoint, os.path.join(path, f"docformer_cp_ep_{epoch}.pt"))
     
     def load_checkpoint(self, path):
         checkpoint = torch.load(path)

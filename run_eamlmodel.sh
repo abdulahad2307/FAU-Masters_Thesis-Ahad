@@ -3,11 +3,11 @@
 #SBATCH --job-name=eaml_training          # Job name
 #SBATCH --output=logs/%x_%j.out           # Standard output log
 #SBATCH --error=logs/%x_%j.err            # Error log
-#SBATCH --partition=v100                  # GPU partition name
+#SBATCH --partition=rtx3080                   # GPU partition name
 #SBATCH --nodes=1                         # Number of nodes
 #SBATCH --ntasks=1                        # Number of tasks
 #SBATCH --cpus-per-task=1                 # Number of CPU cores per task
-#SBATCH --gres=gpu:v100:1                 # Number of GPUs
+#SBATCH --gres=gpu:rtx3080:1                 # Number of GPUs
 #SBATCH --time=23:30:00                   # Time limit hrs:min:sec
 #SBATCH --export=NONE                     # Avoid inheriting unwanted environment variables
 
@@ -21,21 +21,22 @@ conda activate mtil
 export http_proxy=http://proxy:80
 export https_proxy=http://proxy:80
 
-# Move to the repository folder
 export PYTHONPATH=$PYTHONPATH:$(pwd)/FAU-Masters_Thesis-Ahad
 
-echo "Starting EAML Model Training..."
+echo "Starting EAML Training..."
 
-# Run Model Training
-export CUDA_LAUNCH_BLOCKING=1
-python3 src/sota_eaml_model.py \
-    --data_dir /home/woody/iwi5/iwi5280h/dataset/prepdata \
-    --epochs 5 \
-    --batch_size 64 \
-    --lr 0.001 \
-    --device cuda \
-    --classes "letter" "form" "email" "handwritten" "advertisement" "scientific report" "invoice" "presentation" "resume" "memo"
+# Define classes as space-separated list like DocFormer
+CLASSES="letter form email handwritten advertisement scientific_report invoice presentation questionnaire resume memo"
 
-echo "EAML Training Completed. Check logs/training_log.csv for results."
+python src/sota_eaml_model.py \
+    --data_dir /home/woody/iwi5/iwi5280h/dataset/small_dataset \
+    --num_epochs 100 \
+    --batch_size 8 \
+    --learning_rate 1e-3 \
+    --classes $CLASSES \
+    --device cuda
+
+echo "Training Completed. Output: $SLURM_OUTPUT"
 
 #sbatch run_eamlmodel.sh
+#--data_dir /home/woody/iwi5/iwi5280h/dataset/prepdata \
