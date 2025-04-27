@@ -5,81 +5,135 @@ from torch.utils.data import DataLoader as TorchDataLoader, Dataset
 from transformers import BertTokenizer, TrOCRProcessor, VisionEncoderDecoderModel
 from PIL import Image
 import torch
-from typing import Optional, Dict, List, Union
+import torch.nn as nn 
+from typing import Optional, Dict, List
+import time
 
 # ==================== EAML Components ====================
 class EAML_Dataset(Dataset):
     def __init__(self, data_dir: str, transform=None, class_list: Optional[List[str]] = None):
-        """
-        EAML Dataset with OCR text extraction and class list support
-        
-        Args:
-            data_dir: Path to dataset directory
-            transform: Image transformations
-            class_list: List of class names
-        """
         self.data_dir = data_dir
         self.transform = transform
+        self.class_list = sorted(class_list) if class_list else None
         self.samples = []
-        self.class_list = class_list
         
-        # Initializing OCR components (lazy loading)
-        self.ocr_processor = None
-        self.ocr_model = None
+        # Initialize class mappings first
+        self.class_to_idx = {}
+        self.idx_to_class = {}
+        self._build_class_mappings()
+        
+        # Initialize OCR components
+        self._initialize_ocr()
         self.tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
         
+        # Load samples with strict class filtering
         self._load_samples()
-        self._build_class_mappings()
+        self._verify_labels()
+        
+        if not self.samples:
+            raise ValueError(f"No valid samples found for specified classes: {class_list}")
 
     def _build_class_mappings(self):
-        """
-        Build class to index mappings
-        """
+        """Build class to index mappings only for specified classes"""
         if self.class_list is None:
-            # Inferring classes from directory structure
-            self.class_list = sorted({label for _, _, label in self.samples})
-        
+            raise ValueError("Class list must be provided")
+            
         self.class_to_idx = {cls: idx for idx, cls in enumerate(self.class_list)}
-        self.idx_to_class = {idx: cls for cls, idx in self.class_to_idx.items()}
+        self.idx_to_class = {idx: cls for idx, cls in enumerate(self.class_list)}
 
     def _initialize_ocr(self):
-        """
-        Lazy initialization of OCR components
-        """
-        if self.ocr_processor is None:
-            self.ocr_processor = TrOCRProcessor.from_pretrained("microsoft/trocr-base-handwritten", use_fast=True)
+        """Initialize OCR components with proper weights"""
+        start_time = time.time()
+        print("Initializing OCR model...", end=" ")
+        
+        try:
+            self.ocr_processor = TrOCRProcessor.from_pretrained("microsoft/trocr-base-handwritten")
             self.ocr_model = VisionEncoderDecoderModel.from_pretrained("microsoft/trocr-base-handwritten")
-            # Freezing OCR model
+            
+            # Handle newly initialized weights
+            if hasattr(self.ocr_model.encoder, 'pooler'):
+                print("\nInitializing missing pooler weights...")
+                nn.init.xavier_uniform_(self.ocr_model.encoder.pooler.dense.weight)
+                nn.init.zeros_(self.ocr_model.encoder.pooler.dense.bias)
+            
+            # Freeze OCR model
             for param in self.ocr_model.parameters():
                 param.requires_grad = False
+                
             self.ocr_model.eval()
+            print(f"done in {time.time()-start_time:.2f}s")
+        except Exception as e:
+            print(f"\nFailed to initialize OCR model: {str(e)}")
+            raise
+
+    def _verify_labels(self):
+        """Verify all loaded samples have valid labels"""
+        if not hasattr(self, 'class_to_idx'):
+            raise AttributeError("Class mappings not initialized. Call _build_class_mappings() first.")
+        
+        valid_samples = []
+        invalid_samples = 0
+        
+        for sample in self.samples:
+            _, _, label = sample
+            if label in self.class_to_idx:
+                valid_samples.append(sample)
+            else:
+                invalid_samples += 1
+        
+        if invalid_samples > 0:
+            print(f"Warning: Found {invalid_samples} samples with invalid labels")
+        
+        self.samples = valid_samples
 
     def _extract_text_from_image(self, image: Image.Image) -> str:
-        """
-        Extract text from image using TrOCR
-        """
+        """Extract text from image using TrOCR"""
         self._initialize_ocr()
-        pixel_values = self.ocr_processor(image, return_tensors="pt").pixel_values
-        with torch.no_grad():
-            generated_ids = self.ocr_model.generate(pixel_values)
-        return self.ocr_processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        
+        try:
+            # Process image
+            pixel_values = self.ocr_processor(image, return_tensors="pt").pixel_values
+            
+            # Generate text
+            with torch.no_grad():
+                generated_ids = self.ocr_model.generate(pixel_values)
+            
+            return self.ocr_processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        except Exception as e:
+            print(f"OCR failed for image: {str(e)}")
+            return ""  # Return empty string if OCR fails
 
     def _load_samples(self):
-        """
-        Load samples from directory structure
-        """
-        print(f"Loading EAML dataset from: {self.data_dir}")
+        print(f"Loading dataset from: {self.data_dir}")
+        print(f"Filtering for classes: {self.class_list}")
+        
+        class_set = set(self.class_list) if self.class_list else set()
+        valid_samples = 0
+        skipped_samples = 0
         
         for root, _, files in os.walk(self.data_dir):
+            label = os.path.basename(root)
+            
+            # Skip if not in our class list
+            if label not in class_set:
+                continue
+                
             for img_file in files:
                 if img_file.lower().endswith((".tif", ".png", ".jpg", ".jpeg")):
                     img_path = os.path.join(root, img_file)
-                    label = os.path.basename(root)
                     
                     try:
+                        # Load image
                         image = Image.open(img_path).convert("RGB")
-                        extracted_text = self._extract_text_from_image(image)
                         
+                        # Extract text
+                        extracted_text = self._extract_text_from_image(image)
+                        if not extracted_text.strip():
+                            print(f"⚠️ Empty text extracted from {img_path}")
+                            skipped_samples += 1
+                            continue
+                            
+                        # Tokenize text
                         tokenized_text = self.tokenizer(
                             extracted_text,
                             padding="max_length",
@@ -89,11 +143,26 @@ class EAML_Dataset(Dataset):
                         )
                         
                         self.samples.append((img_path, tokenized_text, label))
+                        valid_samples += 1
+                        
                     except Exception as e:
-                        print(f"⚠️ Error processing {img_path}: {e}")
+                        print(f"⚠️ Error processing {img_path}: {str(e)}")
+                        skipped_samples += 1
                         continue
         
-        print(f"Loaded {len(self.samples)} samples with {len(set(self.class_list if self.class_list else []))} classes")
+        print(f"Loaded {valid_samples} valid samples")
+        print(f"Skipped {skipped_samples} samples due to errors")
+        if valid_samples % 100 == 0:
+            print(f"Processed {valid_samples} samples...")
+
+    def _build_class_mappings(self):
+        """Build class mappings only for specified classes"""
+        if not self.class_list:
+            raise ValueError("Class list must be provided")
+            
+        self.class_to_idx = {cls: idx for idx, cls in enumerate(sorted(self.class_list))}
+        self.idx_to_class = {idx: cls for idx, cls in enumerate(sorted(self.class_list))}
+        print(f"Class mappings created for {len(self.class_to_idx)} classes")
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -101,20 +170,22 @@ class EAML_Dataset(Dataset):
     def __getitem__(self, idx: int) -> Dict:
         img_path, text_data, label = self.samples[idx]
         
-        image = Image.open(img_path).convert("RGB")
-        if self.transform:
-            image = self.transform(image)
-        
-        label_idx = self.class_to_idx[label]
-        
-        return {
-            'image': image,
-            'text': {
-                'input_ids': text_data['input_ids'].squeeze(0),
-                'attention_mask': text_data['attention_mask'].squeeze(0)
-            },
-            'label': torch.tensor(label_idx)
-        }
+        try:
+            image = Image.open(img_path).convert("RGB")
+            if self.transform:
+                image = self.transform(image)
+                
+            return {
+                'image': image,
+                'text': {
+                    'input_ids': text_data['input_ids'].squeeze(0),
+                    'attention_mask': text_data['attention_mask'].squeeze(0)
+                },
+                'label': torch.tensor(self.class_to_idx[label])
+            }
+        except Exception as e:
+            print(f"Error loading sample {img_path}: {str(e)}")
+            raise
 
 def eaml_collate_fn(batch: List[Dict]) -> Dict:
     """
@@ -132,22 +203,19 @@ def eaml_collate_fn(batch: List[Dict]) -> Dict:
 class EAML_DataLoader:
     def __init__(self, data_dir: str, batch_size: int = 32, num_workers: int = 4,
                  img_size: int = 224, class_list: Optional[List[str]] = None):
-        """
-        DataLoader specifically for EAML model
-        
-        Args:
-            data_dir: Root directory containing train/val/test subdirectories
-            batch_size: Batch size
-            num_workers: Number of workers for data loading
-            img_size: Size for image resizing
-            class_list: Optional list of class names
-        """
+        if not class_list:
+            raise ValueError("Class list cannot be empty")
+            
         self.data_dir = data_dir
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.img_size = img_size
-        self.class_list = class_list
+        self.class_list = sorted(class_list)
         
+        # Build class mappings once for all splits
+        self.class_to_idx = {cls: idx for idx, cls in enumerate(self.class_list)}
+        self.idx_to_class = {idx: cls for idx, cls in enumerate(self.class_list)}
+
         self.transform = transforms.Compose([
             transforms.Resize((img_size, img_size)),
             transforms.ToTensor(),
@@ -155,19 +223,11 @@ class EAML_DataLoader:
                                std=[0.229, 0.224, 0.225])
         ])
 
-    def get_loader(self, split: str = 'train', shuffle: bool = True) -> TorchDataLoader:
-        """
-        Getting DataLoader for specific split
-        
-        Args:
-            split: One of 'train', 'val', or 'test'
-            shuffle: Whether to shuffle the data
-        Returns:
-            Configured DataLoader
-        """
+    def get_loader(self, split: str, shuffle: bool = True):
+        """Get loader for specific split with class validation"""
         dataset_path = os.path.join(self.data_dir, split)
         if not os.path.exists(dataset_path):
-            raise ValueError(f"Dataset directory does not exist: {dataset_path}")
+            raise ValueError(f"Split directory does not exist: {dataset_path}")
         
         dataset = EAML_Dataset(
             data_dir=dataset_path,
@@ -175,13 +235,28 @@ class EAML_DataLoader:
             class_list=self.class_list
         )
         
-        return TorchDataLoader(
+        return torch.utils.data.DataLoader(
             dataset,
             batch_size=self.batch_size,
             shuffle=shuffle,
             num_workers=self.num_workers,
             collate_fn=eaml_collate_fn
         )
+
+    def get_class_stats(self):
+        """Get statistics about class distribution across splits"""
+        stats = {}
+        for split in ['train', 'val', 'test']:
+            try:
+                loader = self.get_loader(split, shuffle=False)
+                class_counts = {cls: 0 for cls in self.class_list}
+                for _, _, label in loader.dataset.samples:
+                    class_counts[label] += 1
+                stats[split] = class_counts
+            except ValueError as e:
+                print(f"Skipping {split} split: {str(e)}")
+                continue
+        return stats
 
     def get_class_mappings(self) -> Dict:
         """
@@ -197,6 +272,16 @@ class EAML_DataLoader:
             'idx_to_class': sample_dataset.idx_to_class,
             'classes': sample_dataset.class_list
         }
+
+def eaml_collate_fn(batch: List[Dict]) -> Dict:
+    return {
+        'images': torch.stack([item['image'] for item in batch]),
+        'texts': {
+            'input_ids': torch.stack([item['text']['input_ids'] for item in batch]),
+            'attention_mask': torch.stack([item['text']['attention_mask'] for item in batch])
+        },
+        'labels': torch.stack([item['label'] for item in batch])
+    }
 
 # ==================== DocFormer Components ====================
 class DocFormerDataset(Dataset):

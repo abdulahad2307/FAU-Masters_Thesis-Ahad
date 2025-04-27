@@ -33,7 +33,7 @@ python src/sota_docformer_model.py \
     --output_dir outputs/funsd \
     --batch_size 8 \
     --num_epochs 100 \
-    --learning_rate 1e-3 \
+    --learning_rate 2.5e-5 \
     --classes "letter,form,email,handwritten,advertisement,scientific report,invoice,resume"
 
 echo "DocFormer Training Completed."

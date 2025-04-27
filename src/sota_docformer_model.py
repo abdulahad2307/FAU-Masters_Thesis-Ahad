@@ -1,105 +1,130 @@
+#!/usr/bin/env python3
 import argparse
 import os
+import time
 import torch
+import logging
 from torch.utils.data import DataLoader
 from utils.docformer.dataset import RVLCDIPDataset, collate_fn
 from utils.docformer.model import DocFormer
 from utils.docformer.trainer import DocFormerTrainer
 from utils.docformer.config import DocFormerConfig
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("docformer_training.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
 def main():
-    parser = argparse.ArgumentParser(description="DocFormer for Document Classification")
-    parser.add_argument('--data_dir', type=str, required=True, help='Path to dataset directory')
-    parser.add_argument('--output_dir', type=str, default='outputs', help='Output directory')
-    parser.add_argument('--batch_size', type=int, default=8, help='Batch size')
-    parser.add_argument('--num_epochs', type=int, default=50, help='Number of epochs')
-    parser.add_argument('--learning_rate', type=float, default=2.5e-5, help='Learning rate')
-    parser.add_argument('--max_seq_length', type=int, default=512, help='Max sequence length')
-    parser.add_argument('--classes', type=str, default=None, 
-                       help='Comma-separated list of classes to include (e.g. "letter,form,email")')
-    parser.add_argument('--eval_only', action='store_true', help='Run evaluation only')
-    parser.add_argument('--resume', type=str, help='Path to model checkpoint')
+    # Set multiprocessing start method
+    torch.multiprocessing.set_start_method('spawn', force=True)
+    
+    start_time = time.time()
+    logger.info("=== DocFormer Training ===")
+    
+    # Parse arguments
+    parser = argparse.ArgumentParser(description="DocFormer for Document Understanding")
+    parser.add_argument('--data_dir', required=True, help='Path to dataset directory')
+    parser.add_argument('--output_dir', default='docformer_outputs', help='Output directory')
+    parser.add_argument('--batch_size', type=int, default=8)
+    parser.add_argument('--num_epochs', type=int, default=50)
+    parser.add_argument('--learning_rate', type=float, default=2.5e-5)
+    parser.add_argument('--max_seq_length', type=int, default=512)
+    parser.add_argument('--classes', help='Comma-separated list of classes')
+    parser.add_argument('--resume', help='Path to model checkpoint')
     args = parser.parse_args()
 
-    # Parse classes if provided
+    # Initialize config
+    config = DocFormerConfig()
+    config.batch_size = args.batch_size
+    config.num_train_epochs = args.num_epochs
+    config.learning_rate = args.learning_rate
+    config.output_dir = args.output_dir
+    config.print_config()
+
+    # Parse classes
     class_list = [c.strip() for c in args.classes.split(',')] if args.classes else None
 
+    # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # Initialize datasets with class filtering
+    # Initialize datasets
+    logger.info("Initializing datasets...")
     train_dataset = RVLCDIPDataset(
         data_dir=args.data_dir,
         max_seq_length=args.max_seq_length,
         split='train',
-        classes=class_list
+        classes=class_list,
+        config=config
     )
     
     val_dataset = RVLCDIPDataset(
         data_dir=args.data_dir,
         max_seq_length=args.max_seq_length,
         split='val',
-        classes=class_list
+        classes=class_list,
+        config=config
     )
 
     # Initialize data loaders
+    logger.info("Initializing data loaders...")
     train_loader = DataLoader(
         train_dataset,
-        batch_size=args.batch_size,
+        batch_size=config.batch_size,
         shuffle=True,
         num_workers=4,
-        collate_fn=collate_fn
+        collate_fn=collate_fn,
+        pin_memory=True,
+        persistent_workers=True
     )
     
     val_loader = DataLoader(
         val_dataset,
-        batch_size=args.batch_size,
+        batch_size=config.batch_size,
         shuffle=False,
         num_workers=4,
-        collate_fn=collate_fn
+        collate_fn=collate_fn,
+        pin_memory=True,
+        persistent_workers=True
     )
-    
-    # Initialize model and trainer
-    config = DocFormerConfig()
+
+    # Initialize model
+    logger.info("Initializing model...")
     model = DocFormer(config, num_classes=len(train_dataset.class_to_idx))
+    model.to(config.device)
     
     if args.resume:
-        checkpoint = torch.load(args.resume)
+        logger.info(f"Loading checkpoint from {args.resume}...")
+        checkpoint = torch.load(args.resume, map_location=config.device)
         model.load_state_dict(checkpoint['model_state_dict'])
-        print(f"Loaded model from {args.resume}")
 
+    # Initialize trainer
+    logger.info("Initializing trainer...")
     trainer = DocFormerTrainer(
         model=model,
         config=config,
-        device='cuda' if torch.cuda.is_available() else 'cpu'
+        train_loader=train_loader,
+        eval_loader=val_loader
     )
 
-    if not args.eval_only:
-        # Initialize tracking variables
-        min_val_loss = float('inf')
-        best_val_acc = 0.0
-        
-        # Training loop
-        for epoch in range(args.num_epochs):
-            # Train for one epoch
-            train_loss = trainer.train_epoch(train_loader, epoch)
-            
-            # Evaluate on validation set
-            val_loss, val_acc = trainer.evaluate(val_loader)
-            
-            print(f"Epoch {epoch+1}: Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
-            
-            # Save checkpoint if validation loss improves
-            is_best = val_loss < min_val_loss
-            if is_best:
-                min_val_loss = val_loss
-                best_val_acc = val_acc
-                
-            trainer.save_checkpoint(args.output_dir, epoch, best=is_best)
-    
-    # Final evaluation
-    val_loss, val_acc = trainer.evaluate(val_loader)
-    print(f"\nFinal Results - Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
-    print(f"Best Val Loss: {min_val_loss:.4f} | Best Val Acc: {best_val_acc:.2f}%")
+    # Training loop
+    logger.info("Starting training...")
+    try:
+        training_results = trainer.train(args.output_dir)
+        logger.info("\n=== Training Completed ===")
+        logger.info(f"Best Val Loss: {training_results['best_val_loss']:.4f}")
+        logger.info(f"Best Val Acc: {training_results['best_val_acc']:.2f}%")
+    except Exception as e:
+        logger.error(f"Training failed: {str(e)}")
+        raise
+
+    logger.info(f"\nTotal execution time: {(time.time()-start_time)/60:.2f} minutes")
 
 if __name__ == '__main__':
     main()
