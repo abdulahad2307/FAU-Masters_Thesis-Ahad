@@ -81,7 +81,7 @@ def run_incremental_learning(
                 model=model,
                 optimizer=optimizer,
                 epoch=epoch + 1,
-                path=os.path.join(checkpoint_dir, f"step_{step}.pth")
+                path=os.path.join(checkpoint_dir, f"{new_classes}_ep_{step}.pth")
             )
 
 if __name__ == "__main__":

@@ -51,13 +51,16 @@ def train_one_epoch(model, dataloader, optimizer, criterion, device):
                 'bboxes': batch['bboxes'].to(device)
             }
             labels = batch['labels'].to(device)
-            outputs = model(**inputs)
+            outputs = model(**inputs, task="classification")
         
-        loss = criterion(outputs, labels)
+        # Extract logits from model output (which is a dictionary)
+        logits = outputs['logits']
+        
+        loss = criterion(logits, labels)
         loss.backward()
         optimizer.step()
         
-        preds = torch.argmax(outputs, dim=1)
+        preds = torch.argmax(logits, dim=1)
         all_preds.extend(preds.detach().cpu().tolist())
         all_labels.extend(labels.cpu().tolist())
         total_loss += loss.item()
@@ -89,9 +92,12 @@ def evaluate(model, dataloader, device):
                     'bboxes': batch['bboxes'].to(device)
                 }
                 labels = batch['labels'].to(device)
-                outputs = model(**inputs)
+                outputs = model(**inputs, task="classification")
             
-            preds = torch.argmax(outputs, dim=1)
+            # Extract logits from model output
+            logits = outputs['logits']
+            
+            preds = torch.argmax(logits, dim=1)
             all_preds.extend(preds.cpu().tolist())
             all_labels.extend(labels.cpu().tolist())
     
