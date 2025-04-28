@@ -1,12 +1,12 @@
 import os
-from typing import List, Optional, Dict
+from typing import List
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from PIL import Image
 import torch
 from transformers import BertTokenizer, TrOCRProcessor, VisionEncoderDecoderModel
 
-# ---- Common Transform ----
+# Common transform
 common_transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
@@ -58,7 +58,8 @@ class EAMLClassILDataset(Dataset):
                     except Exception as e:
                         print(f"Skipping {img_path} due to: {e}")
 
-    def __len__(self): return len(self.samples)
+    def __len__(self): 
+        return len(self.samples)
 
     def __getitem__(self, idx):
         img_path, tokens, label = self.samples[idx]
@@ -91,6 +92,7 @@ class DocFormerClassILDataset(Dataset):
     def __init__(self, data_dir: str, current_classes: List[str], tokenizer_name="bert-base-uncased", max_seq_length=512):
         self.data_dir = data_dir
         self.current_classes = current_classes
+        self.class_to_idx = {cls: idx for idx, cls in enumerate(current_classes)}
         self.tokenizer = BertTokenizer.from_pretrained(tokenizer_name)
         self.max_seq_length = max_seq_length
         self.samples = []
@@ -110,7 +112,8 @@ class DocFormerClassILDataset(Dataset):
                         'class_name': class_name
                     })
 
-    def __len__(self): return len(self.samples)
+    def __len__(self): 
+        return len(self.samples)
 
     def __getitem__(self, idx):
         sample = self.samples[idx]
@@ -139,14 +142,49 @@ def docformer_collate_fn(batch):
         "labels": torch.stack([x["label"] for x in batch])
     }
 
+
 # ========================== Wrapper Loader ==========================
-def get_class_il_loader(model_type: str, data_dir: str, current_classes: List[str], batch_size=32, num_workers=4, split="train"):
-    path = os.path.join(data_dir, split)
+def get_class_il_loader(
+    model_type: str,
+    data_dir: str,
+    current_classes: List[str],
+    batch_size: int = 32,
+    num_workers: int = 4) -> DataLoader:
+    """Get dataloader for class incremental learning
+    
+    Args:
+        model_type: Either 'eaml' or 'docformer'
+        data_dir: Root directory containing class folders
+        current_classes: List of classes to include
+        batch_size: Number of samples per batch
+        num_workers: Number of workers for data loading
+        split: Data split ('train', 'val', 'test')
+        
+    Returns:
+        Configured DataLoader for the specified model type
+    """    
     if model_type == "eaml":
-        dataset = EAMLClassILDataset(path, current_classes, transform=common_transform)
-        return DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, collate_fn=eaml_collate_fn)
+        dataset = EAMLClassILDataset(
+            data_dir=data_dir,
+            current_classes=current_classes,
+            transform=common_transform
+        )
+        return DataLoader(
+            dataset,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            collate_fn=eaml_collate_fn
+        )
     elif model_type == "docformer":
-        dataset = DocFormerClassILDataset(path, current_classes)
-        return DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, collate_fn=docformer_collate_fn)
+        dataset = DocFormerClassILDataset(
+            data_dir=data_dir,
+            current_classes=current_classes
+        )
+        return DataLoader(
+            dataset,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            collate_fn=docformer_collate_fn
+        )
     else:
         raise ValueError(f"Unsupported model type: {model_type}")
