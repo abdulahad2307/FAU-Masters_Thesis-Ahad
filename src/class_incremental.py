@@ -8,7 +8,7 @@ from utils.eaml.eaml_model import EAMLModel
 from utils.docformer.model import DocFormer
 from utils.docformer.config import DocFormerConfig
 from utils.class_IL.dataloader_utils import get_class_il_loader
-from utils.class_IL.train_utils import save_checkpoint, load_checkpoint, train_one_epoch, evaluate
+from utils.class_IL.train_utils import save_checkpoint, load_checkpoint, train_one_epoch, evaluate, CILMetrics
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -26,10 +26,21 @@ def run_incremental_learning(
     print("Starting Class Incremental Learning...")
     os.makedirs(checkpoint_dir, exist_ok=True)
 
+    # Initialize metrics tracker
+    initial_classes = class_order[:start_step+1] if start_step > 0 else [class_order[0]]
+    metrics = CILMetrics(initial_classes)
+
+    # Initialize best accuracy tracking
+    best_acc = 0.0
+
     for step in range(start_step, len(class_order)):
         current_classes = class_order[:step + 1]
-        new_classes = [class_order[step]]
+        new_classes = [class_order[step]] if step > start_step else []
         print(f"Step {step+1}/{len(class_order)} | Training on new classes: {new_classes}")
+
+         # Update metrics with new class information
+        if step > start_step:
+            metrics.incremental_state_update(new_classes)
 
         # Get dataloaders
         train_loader = get_class_il_loader(
@@ -70,19 +81,35 @@ def run_incremental_learning(
             print(f"Training Epoch {epoch+1}/{num_epochs}")
             start_time = time.time()
 
-            train_one_epoch(model, train_loader, optimizer, criterion, DEVICE)
-            val_acc = evaluate(model, val_loader, DEVICE)
+            #train_one_epoch(model, train_loader, optimizer, criterion, DEVICE)
+            train_metrics = train_one_epoch(model, train_loader, optimizer, criterion, DEVICE, metrics)
+            #val_acc = evaluate(model, val_loader, DEVICE)
+            val_metrics = evaluate(model, val_loader, DEVICE, metrics)
 
             epoch_time = time.time() - start_time
-            print(f"Epoch Time: {epoch_time:.2f}s | Val Acc: {val_acc:.4f}")
-
-            # Save checkpoint
-            save_checkpoint(
-                model=model,
-                optimizer=optimizer,
-                epoch=epoch + 1,
-                path=os.path.join(checkpoint_dir, f"{new_classes}_ep_{step}.pth")
-            )
+            #print(f"Epoch Time: {epoch_time:.2f}s | Val Acc: {val_acc:.4f}")
+            print(f"Epoch Time: {epoch_time:.2f}s | Val Acc: {val_metrics['top1_acc']:.4f}")
+    
+            # Save best model based on validation accuracy
+            if val_metrics['top1_acc'] > best_acc:
+                best_acc = val_metrics['top1_acc']
+                # Save checkpoint
+                save_checkpoint(
+                    model=model,
+                    optimizer=optimizer,
+                    epoch=epoch + 1,
+                    path=os.path.join(checkpoint_dir, f"{new_classes}_ep_{step}.pth")
+                )
+        
+        # Calculate and print incremental learning gap (G_IL)
+        if step > 0:
+            full_model_acc = 0.15  # Replace with your full model accuracy
+            current_acc = val_metrics['top1_acc']
+            G_IL = (current_acc - full_model_acc) / (1 - full_model_acc)
+            print(f"Incremental Learning Gap (G_IL): {G_IL:.4f}")
+        
+        # Reset best accuracy for next step
+        best_acc = 0.0
 
 if __name__ == "__main__":
     import argparse
