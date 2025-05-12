@@ -8,14 +8,17 @@ import torch
 import torch.nn as nn 
 from typing import Optional, Dict, List
 import time
+from utils.eaml.ocr_manager import OCRManager
 
 # ==================== EAML Components ====================
 class EAML_Dataset(Dataset):
-    def __init__(self, data_dir: str, transform=None, class_list: Optional[List[str]] = None):
+    def __init__(self, data_dir: str, transform=None, class_list: Optional[List[str]] = None, ocr_engine="trocr", **ocr_kwargs):
         self.data_dir = data_dir
         self.transform = transform
         self.class_list = sorted(class_list) if class_list else None
         self.samples = []
+        self.ocr_engine_type = ocr_engine
+        self.ocr_kwargs = ocr_kwargs
         
         # Initialize class mappings first
         self.class_to_idx = {}
@@ -23,7 +26,7 @@ class EAML_Dataset(Dataset):
         self._build_class_mappings()
         
         # Initialize OCR components
-        self._initialize_ocr()
+        #self._initialize_ocr()
         self.tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
         
         # Load samples with strict class filtering
@@ -85,9 +88,9 @@ class EAML_Dataset(Dataset):
             print(f"Warning: Found {invalid_samples} samples with invalid labels")
         
         self.samples = valid_samples
-
+    """
     def _extract_text_from_image(self, image: Image.Image) -> str:
-        """Extract text from image using TrOCR"""
+        #Extract text from image using TrOCR
         self._initialize_ocr()
         
         try:
@@ -102,7 +105,34 @@ class EAML_Dataset(Dataset):
         except Exception as e:
             print(f"OCR failed for image: {str(e)}")
             return ""  # Return empty string if OCR fails
+    """
 
+    def _extract_text_from_image(self, image: Image.Image) -> str:
+        """Extract text from image using the configured OCR engine"""
+        ocr_manager = OCRManager()
+        engine = ocr_manager.get_ocr_engine(self.ocr_engine_type, **self.ocr_kwargs)
+        
+        try:
+            if self.ocr_engine_type == "trocr":
+                # Process image
+                pixel_values = engine["processor"](image, return_tensors="pt").pixel_values
+                
+                # Generate text
+                with torch.no_grad():
+                    generated_ids = engine["model"].generate(pixel_values)
+                return engine["processor"].batch_decode(generated_ids, skip_special_tokens=True)[0]
+                
+            elif self.ocr_engine_type == "tesseract":
+                return engine["engine"].image_to_string(image)
+                
+            elif self.ocr_engine_type == "easyocr":
+                result = engine["reader"].readtext(np.array(image))
+                return " ".join([text for _, text, _ in result])
+                
+        except Exception as e:
+            print(f"OCR failed for image: {str(e)}")
+            return ""  # Return empty string if OCR fails
+        
     def _load_samples(self):
         print(f"Loading dataset from: {self.data_dir}")
         print(f"Filtering for classes: {self.class_list}")
@@ -129,7 +159,7 @@ class EAML_Dataset(Dataset):
                         # Extract text
                         extracted_text = self._extract_text_from_image(image)
                         if not extracted_text.strip():
-                            print(f"⚠️ Empty text extracted from {img_path}")
+                            print(f"Empty text extracted from {img_path}")
                             skipped_samples += 1
                             continue
                             
@@ -146,7 +176,7 @@ class EAML_Dataset(Dataset):
                         valid_samples += 1
                         
                     except Exception as e:
-                        print(f"⚠️ Error processing {img_path}: {str(e)}")
+                        print(f"Error processing {img_path}: {str(e)}")
                         skipped_samples += 1
                         continue
         
@@ -202,7 +232,7 @@ def eaml_collate_fn(batch: List[Dict]) -> Dict:
 
 class EAML_DataLoader:
     def __init__(self, data_dir: str, batch_size: int = 32, num_workers: int = 4,
-                 img_size: int = 224, class_list: Optional[List[str]] = None):
+                 img_size: int = 224, class_list: Optional[List[str]] = None, ocr_engine="trocr", **ocr_kwargs):
         if not class_list:
             raise ValueError("Class list cannot be empty")
             
@@ -211,6 +241,9 @@ class EAML_DataLoader:
         self.num_workers = num_workers
         self.img_size = img_size
         self.class_list = sorted(class_list)
+
+        self.ocr_engine = ocr_engine
+        self.ocr_kwargs = ocr_kwargs
         
         # Build class mappings once for all splits
         self.class_to_idx = {cls: idx for idx, cls in enumerate(self.class_list)}
@@ -228,11 +261,20 @@ class EAML_DataLoader:
         dataset_path = os.path.join(self.data_dir, split)
         if not os.path.exists(dataset_path):
             raise ValueError(f"Split directory does not exist: {dataset_path}")
-        
+        """
         dataset = EAML_Dataset(
             data_dir=dataset_path,
             transform=self.transform,
             class_list=self.class_list
+        )
+        """
+
+        dataset = EAML_Dataset(
+            data_dir=dataset_path,
+            transform=self.transform,
+            class_list=self.class_list,
+            ocr_engine=self.ocr_engine,
+            **self.ocr_kwargs
         )
         
         return torch.utils.data.DataLoader(
