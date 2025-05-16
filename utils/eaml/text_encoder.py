@@ -21,6 +21,9 @@ class TextEncoder(nn.Module):
             param.requires_grad = False
 
     def forward(self, text):
+
+        if text is None:
+            raise ValueError("Text input cannot be None")
         if isinstance(text, str):
             text = self.tokenizer(text, return_tensors="pt")
         

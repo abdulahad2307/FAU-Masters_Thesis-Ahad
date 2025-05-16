@@ -105,11 +105,23 @@ class RotationAugmentedDistillation(IncrementalStrategy):
             labels = batch['labels'].to(self.device)
             
             # Original data forward pass
+            """
             outputs = model(
                 images=images,
                 text_input_ids=text_input_ids,
                 text_attention_mask=text_attention_mask
             )
+            """
+
+            outputs = model(
+                images=images,
+                texts={
+                    'input_ids': text_input_ids,
+                    'attention_mask': text_attention_mask
+                }
+            )
+
+
             logits = outputs
             
             # Classification loss

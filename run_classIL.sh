@@ -31,14 +31,14 @@ export CUDA_LAUNCH_BLOCKING=1
 
 python src/class_incremental.py \
   --data_dir /home/woody/iwi5/iwi5280h/dataset/small_dataset \
-  --checkpoint_dir checkpoints/cil_rad \
+  --checkpoint_dir checkpoints/cil_eaml \
   --model_name "eaml" \
   --class_order "letter,form,email,handwritten,advertisement,scientific_report,invoice,presentation,questionnaire,resume,memo,scientific publication,specification,file folder,news article,budget" \
   --start_step 11 \
-  --batch_size 8 \
+  --batch_size 4 \
   --lr 2e-5 \
-  --num_epochs 10 \
-  --strategy "rad" \
+  --num_epochs 100 \
+  --strategy "standard" \
   --temperature 2.0 \
   --lambda_distill 1.0 \
   --base_model_path /home/hpc/iwi5/iwi5280h/projects/FAU-Masters_Thesis-Ahad/outputs/eaml_20250511_160135/eaml_best_model.pt  # Path to pretrained model
