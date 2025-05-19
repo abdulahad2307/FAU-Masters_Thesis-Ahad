@@ -24,26 +24,51 @@ export https_proxy=http://proxy:80
 # Move to the repository folder
 export PYTHONPATH=$PYTHONPATH:$(pwd)/FAU-Masters_Thesis-Ahad
 
-echo "Starting CIL Test Run..."
+#echo "Starting CIL Test Run..."
 
 # Test with just 3 classes in incremental steps
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export CUDA_LAUNCH_BLOCKING=1
+
+#python src/class_incremental.py \
+#  --data_dir /home/woody/iwi5/iwi5280h/dataset/small_dataset \
+#  --checkpoint_dir checkpoints/cil_eaml \
+#  --model_name "eaml" \
+#  --class_order "letter,form,email,handwritten,advertisement,scientific_report,invoice,presentation,questionnaire,resume,memo,scientific publication,specification,file folder,news article,budget" \
+#  --start_step 11 \
+#  --batch_size 4 \
+#  --lr 2e-5 \
+#  --num_epochs 100 \
+#  --strategy "standard" \
+#  --temperature 2.0 \
+#  --lambda_distill 1.0 \
+#  --base_model_path /home/hpc/iwi5/iwi5280h/projects/FAU-Masters_Thesis-Ahad/outputs/eaml_20250511_160135/eaml_best_model.pt  # Path to pretrained model
+
+#echo "CIL Test Run Completed."
+
+echo "Starting Enhanced Class Incremental Learning..."
 
 python src/class_incremental.py \
   --data_dir /home/woody/iwi5/iwi5280h/dataset/small_dataset \
-  --checkpoint_dir checkpoints/cil_eaml \
+  --checkpoint_dir checkpoints/enhanced_cil \
   --model_name "eaml" \
   --class_order "letter,form,email,handwritten,advertisement,scientific_report,invoice,presentation,questionnaire,resume,memo,scientific publication,specification,file folder,news article,budget" \
   --start_step 11 \
   --batch_size 4 \
   --lr 2e-5 \
   --num_epochs 100 \
-  --strategy "standard" \
+  --strategy "distillation" \
   --temperature 2.0 \
   --lambda_distill 1.0 \
-  --base_model_path /home/hpc/iwi5/iwi5280h/projects/FAU-Masters_Thesis-Ahad/outputs/eaml_20250511_160135/eaml_best_model.pt  # Path to pretrained model
+  --lambda_ewc 5000.0 \
+  --use_ewc \
+  --use_exemplars \
+  --max_exemplars 200 \
+  --exemplar_selection "herding" \
+  --training_mode "last_layer" \
+  --base_model_path /home/hpc/iwi5/iwi5280h/projects/FAU-Masters_Thesis-Ahad/outputs/eaml_20250511_160135/eaml_best_model.pt
 
-echo "CIL Test Run Completed."
+echo "Enhanced Class Incremental Learning Completed."
 
 # To run:
 # sbatch run_classIL.sh

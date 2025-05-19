@@ -93,7 +93,7 @@ def save_checkpoint(model, optimizer, epoch, path):
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
     }, path)
-    print(f"Checkpoint saved to {path}")
+    print(f"Checkpoint saved to {path} \n")
 
 def load_checkpoint(model, optimizer, path, device):
     """Load training checkpoint"""
@@ -303,8 +303,7 @@ def evaluate(model, dataloader, device, metrics):
     eval_metrics = metrics.get_metrics()
     
     # Calculate G_IL (Incremental Learning Gap)
-    # Assuming full model accuracy is 0.85 (replace with actual value)
-    full_model_acc = 0.85  # Replace with your full model accuracy
+    full_model_acc = 0.76  # Replace with your full model accuracy
     g_il = None
     if 'top1_acc' in eval_metrics:
         current_acc = eval_metrics['top1_acc']
