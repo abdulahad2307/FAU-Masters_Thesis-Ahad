@@ -1,319 +1,264 @@
+import torch
+import torch.nn as nn
 import os
 import time
-import torch
-import numpy as np
 from tqdm import tqdm
-from typing import Dict, List, Optional, Tuple
 
-class DILMetrics:
-    """Metrics tracking for Domain Incremental Learning"""
-    def __init__(self):
-        self.domains = []
-        self.accuracies = {}
-        self.losses = {}
-        self.confusion_matrices = {}
-        
-    def add_domain(self, domain):
-        """Add a new domain to track metrics for"""
-        if domain not in self.domains:
-            self.domains.append(domain)
-            
-    def update(self, domain, preds, labels, loss=None):
-        """Update metrics for a domain"""
-        # Convert to numpy arrays if tensors
-        if isinstance(preds, torch.Tensor):
-            preds = preds.cpu().numpy()
-        if isinstance(labels, torch.Tensor):
-            labels = labels.cpu().numpy()
-            
-        # Compute accuracy
-        correct = (preds == labels).sum()
-        total = len(labels)
-        accuracy = correct / total if total > 0 else 0
-        
-        # Update accuracies
-        if domain not in self.accuracies:
-            self.accuracies[domain] = []
-        self.accuracies[domain].append(accuracy)
-        
-        # Update losses
-        if loss is not None:
-            if domain not in self.losses:
-                self.losses[domain] = []
-            self.losses[domain].append(loss)
-            
-        # Update confusion matrix
-        if domain not in self.confusion_matrices:
-            num_classes = max(max(labels) + 1, max(preds) + 1) if len(labels) > 0 and len(preds) > 0 else 1
-            self.confusion_matrices[domain] = np.zeros((num_classes, num_classes))
-            
-        # Extend confusion matrix if needed
-        cm = self.confusion_matrices[domain]
-        max_idx = max(max(labels) + 1, max(preds) + 1) if len(labels) > 0 and len(preds) > 0 else 1
-        if max_idx > cm.shape[0]:
-            new_cm = np.zeros((max_idx, max_idx))
-            new_cm[:cm.shape[0], :cm.shape[1]] = cm
-            self.confusion_matrices[domain] = new_cm
-            cm = new_cm
-            
-        # Update confusion matrix
-        for i in range(len(labels)):
-            cm[labels[i], preds[i]] += 1
-            
-    def get_metrics(self):
-        """Get aggregated metrics"""
-        metrics = {
-            'domains': self.domains,
-            'accuracies': {},
-            'confusion_matrices': self.confusion_matrices
-        }
-        
-        # Compute average accuracy for each domain
-        for domain in self.domains:
-            if domain in self.accuracies:
-                metrics['accuracies'][domain] = np.mean(self.accuracies[domain])
-                
-        # Compute average accuracy across all domains
-        all_accs = [acc for accs in self.accuracies.values() for acc in accs]
-        metrics['mean_accuracy'] = np.mean(all_accs) if all_accs else 0
-        
-        # Compute average loss if available
-        if self.losses:
-            metrics['losses'] = {}
-            for domain in self.domains:
-                if domain in self.losses:
-                    metrics['losses'][domain] = np.mean(self.losses[domain])
-            
-            all_losses = [loss for losses in self.losses.values() for loss in losses]
-            metrics['mean_loss'] = np.mean(all_losses) if all_losses else 0
-            
-        return metrics
-
-def train_one_epoch_dil(
-    model, 
-    dataloader, 
-    domain, 
-    optimizer, 
-    criterion, 
-    device,
-    strategy=None,
-    old_model=None,
-    ewc=None,
-    metrics=None
-):
-    """Train model for one epoch on domain data"""
-    model.train()
+def set_finetune_mode(model, mode="head_only", encoder_unfreeze_depth=1):
+    """Set fine-tuning mode for DIL models with enhanced support"""
     
-    total_loss = 0
-    total_correct = 0
-    total_samples = 0
-    all_preds = []
-    all_labels = []
-    
-    pbar = tqdm(dataloader, desc=f"Training on {domain}")
-    for batch in pbar:
-        optimizer.zero_grad()
+    # Handle DIL wrapped models
+    if hasattr(model, 'base_model') and hasattr(model, 'domain_heads'):
+        # This is a DomainIncrementalWrapper
+        print(f"Setting DIL model to {mode} mode")
         
-        # Handle different batch formats
-        if isinstance(batch, (list, tuple)) and len(batch) == 2:
-            inputs, labels = batch
-            batch = (inputs, domain, labels)
-        elif isinstance(batch, dict):
-            inputs = batch
-            labels = batch['labels'] if 'labels' in batch else batch['targets']
-            batch = (inputs, domain, labels)
+        if mode == "head_only":
+            # Freeze base model
+            for param in model.base_model.parameters():
+                param.requires_grad = False
+            # Unfreeze domain heads
+            for head in model.domain_heads.values():
+                for param in head.parameters():
+                    param.requires_grad = True
+            print("Frozen base model, unfrozen domain heads")
             
-        # Use strategy if provided, otherwise direct forward pass
-        if strategy:
-            loss, preds, labels = strategy.compute_loss(model, batch, criterion, old_model, ewc)
-        else:
-            inputs, batch_domain, labels = batch
+        elif mode == "partial_finetune":
+            # Freeze base model first
+            for param in model.base_model.parameters():
+                param.requires_grad = False
             
-            # Move inputs to device
-            if isinstance(inputs, dict):
-                inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else 
-                         {k2: v2.to(device) for k2, v2 in v.items()} 
-                         for k, v in inputs.items()}
-            else:
-                inputs = inputs.to(device)
-                
-            labels = labels.to(device)
+            # Unfreeze domain heads
+            for head in model.domain_heads.values():
+                for param in head.parameters():
+                    param.requires_grad = True
             
-            # Forward pass
-            logits = model(inputs, batch_domain)
+            # Unfreeze last few encoder layers if available
+            if hasattr(model.base_model, "encoder") and hasattr(model.base_model.encoder, "layer"):
+                encoder_blocks = list(model.base_model.encoder.layer)
+                for layer in encoder_blocks[-encoder_unfreeze_depth:]:
+                    for param in layer.parameters():
+                        param.requires_grad = True
+                print(f"Unfrozen last {encoder_unfreeze_depth} encoder layers")
+            elif hasattr(model.base_model, "image_encoder"):
+                # For EAML model - unfreeze last layers of image encoder
+                if hasattr(model.base_model.image_encoder, "model"):
+                    layers = list(model.base_model.image_encoder.model.children())
+                    for layer in layers[-encoder_unfreeze_depth:]:
+                        for param in layer.parameters():
+                            param.requires_grad = True
+                    print(f"Unfrozen last {encoder_unfreeze_depth} image encoder layers")
             
-            # Compute loss
-            loss = criterion(logits, labels)
+            print("Partial fine-tuning mode enabled")
             
-            # Add EWC regularization if available
-            if ewc is not None:
-                loss += ewc.penalty(model)
-                
-            preds = torch.argmax(logits, dim=1)
+        elif mode == "full_finetune":
+            # Unfreeze everything
+            for param in model.parameters():
+                param.requires_grad = True
+            print("Full fine-tuning mode enabled")
             
-        # Backward and optimize
-        loss.backward()
-        optimizer.step()
+    else:
+        # Handle non-DIL models (backward compatibility)
+        print(f"Setting standard model to {mode} mode")
         
-        # Update metrics
-        total_loss += loss.item() * labels.size(0)
-        total_correct += (preds == labels).sum().item()
-        total_samples += labels.size(0)
-        
-        all_preds.extend(preds.cpu().detach().numpy())
-        all_labels.extend(labels.cpu().detach().numpy())
-        
-        # Update progress bar
-        pbar.set_postfix({
-            'loss': loss.item(),
-            'acc': total_correct / total_samples if total_samples > 0 else 0
-        })
-        
-    # Compute epoch metrics
-    avg_loss = total_loss / total_samples if total_samples > 0 else float('inf')
-    avg_acc = total_correct / total_samples if total_samples > 0 else 0
-    
-    # Update metrics if provided
-    if metrics is not None:
-        metrics.update(domain, all_preds, all_labels, avg_loss)
-        
-    print(f"Train Loss: {avg_loss:.4f}, Accuracy: {avg_acc:.4f}")
-    
-    return {
-        'loss': avg_loss,
-        'accuracy': avg_acc
-    }
-
-def evaluate_dil(
-    model, 
-    dataloader, 
-    domain, 
-    device,
-    metrics=None,
-    evm_classifier=None
-):
-    """Evaluate model on domain data"""
-    model.eval()
-    
-    total_loss = 0
-    total_correct = 0
-    total_samples = 0
-    all_preds = []
-    all_labels = []
-    
-    criterion = torch.nn.CrossEntropyLoss()
-    
-    with torch.no_grad():
-        pbar = tqdm(dataloader, desc=f"Evaluating on {domain}")
-        for batch in pbar:
-            # Handle different batch formats
-            if isinstance(batch, (list, tuple)) and len(batch) == 2:
-                inputs, labels = batch
-            elif isinstance(batch, dict):
-                inputs = batch
-                labels = batch['labels'] if 'labels' in batch else batch['targets']
-            else:
-                inputs, labels = batch[0], batch[1]
-                
-            # Move inputs to device
-            if isinstance(inputs, dict):
-                inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else 
-                         {k2: v2.to(device) for k2, v2 in v.items()} 
-                         for k, v in inputs.items()}
-            else:
-                inputs = inputs.to(device)
-                
-            labels = labels.to(device)
-            
-            # Domain detection with EVM if available
-            if evm_classifier is not None:
-                # Extract features
-                if hasattr(model, 'extract_features'):
-                    features = model.extract_features(inputs, domain)
-                elif hasattr(model, 'base_model') and hasattr(model.base_model, 'forward_features'):
-                    features = model.base_model.forward_features(inputs)
-                else:
-                    features = None
+        if mode == "head_only":
+            for param in model.parameters():
+                param.requires_grad = False
+            # Try different classifier names
+            if hasattr(model, 'classifier'):
+                for param in model.classifier.parameters():
+                    param.requires_grad = True
+            elif hasattr(model, 'fc'):
+                for param in model.fc.parameters():
+                    param.requires_grad = True
+            elif hasattr(model, 'head'):
+                for param in model.head.parameters():
+                    param.requires_grad = True
                     
-                if features is not None:
-                    # Domain prediction
-                    domain_preds = evm_classifier.predict(features.cpu().numpy())
-                    # Count correct domain predictions
-                    correct_domains = sum(1 for d in domain_preds if d == domain)
-                    domain_acc = correct_domains / len(domain_preds) if domain_preds else 0
-                    print(f"Domain detection accuracy: {domain_acc:.4f}")
+        elif mode == "partial_finetune":
+            for param in model.parameters():
+                param.requires_grad = False
             
-            # Forward pass
-            logits = model(inputs, domain)
+            # Unfreeze classifier
+            if hasattr(model, 'classifier'):
+                for param in model.classifier.parameters():
+                    param.requires_grad = True
+            elif hasattr(model, 'fc'):
+                for param in model.fc.parameters():
+                    param.requires_grad = True
+            elif hasattr(model, 'head'):
+                for param in model.head.parameters():
+                    param.requires_grad = True
             
-            # Compute loss
-            loss = criterion(logits, labels)
-            
-            # Compute accuracy
-            preds = torch.argmax(logits, dim=1)
-            
-            # Update metrics
-            total_loss += loss.item() * labels.size(0)
-            total_correct += (preds == labels).sum().item()
-            total_samples += labels.size(0)
-            
-            all_preds.extend(preds.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
-            
-    # Compute metrics
-    avg_loss = total_loss / total_samples if total_samples > 0 else float('inf')
-    avg_acc = total_correct / total_samples if total_samples > 0 else 0
+            # Unfreeze encoder layers if available
+            if hasattr(model, "encoder") and hasattr(model.encoder, "layer"):
+                encoder_blocks = list(model.encoder.layer)
+                for layer in encoder_blocks[-encoder_unfreeze_depth:]:
+                    for param in layer.parameters():
+                        param.requires_grad = True
+                        
+        elif mode == "full_finetune":
+            for param in model.parameters():
+                param.requires_grad = True
     
-    # Update metrics if provided
-    if metrics is not None:
-        metrics.update(domain, all_preds, all_labels, avg_loss)
-        
-    print(f"Evaluation Loss: {avg_loss:.4f}, Accuracy: {avg_acc:.4f}")
-    
-    return {
-        'loss': avg_loss,
-        'accuracy': avg_acc
-    }
+    # Print parameter statistics
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Trainable parameters: {trainable_params:,} / {total_params:,} ({100*trainable_params/total_params:.1f}%)")
 
 def save_checkpoint_dil(model, optimizer, epoch, path):
-    """Save model checkpoint"""
+    """Save checkpoint for DIL models"""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     
-    # Prepare state dict based on model type
-    if isinstance(model, dict):  # Ensemble model
-        model_state = {k: v.state_dict() for k, v in model.items()}
-    else:
-        model_state = model.state_dict()
-    
-    # Save checkpoint
-    torch.save({
+    checkpoint = {
         'epoch': epoch,
-        'model_state_dict': model_state,
-        'optimizer_state_dict': optimizer.state_dict(),
-    }, path)
+        'optimizer_state_dict': optimizer.state_dict()
+    }
     
-    print(f"Checkpoint saved to {path}")
+    if isinstance(model, dict):
+        # Multiple models (ensemble)
+        checkpoint['model_state_dict'] = {
+            name: m.state_dict() for name, m in model.items()
+        }
+    else:
+        # Single model
+        checkpoint['model_state_dict'] = model.state_dict()
+    
+    torch.save(checkpoint, path)
+    print(f"Checkpoint saved: {path}")
 
 def load_checkpoint_dil(model, optimizer, path, device):
-    """Load model checkpoint"""
+    """Load checkpoint for DIL models"""
     if not os.path.exists(path):
-        print(f"No checkpoint found at {path}, starting from scratch.")
+        print("No checkpoint found, starting from scratch.")
         return 0
     
-    # Load checkpoint
     checkpoint = torch.load(path, map_location=device)
     
-    # Load model state based on model type
-    if isinstance(model, dict):  # Ensemble model
-        for name, m in model.items():
+    if isinstance(model, dict):
+        for name, submodel in model.items():
             if name in checkpoint['model_state_dict']:
-                m.load_state_dict(checkpoint['model_state_dict'][name])
+                submodel.load_state_dict(checkpoint['model_state_dict'][name])
     else:
         model.load_state_dict(checkpoint['model_state_dict'])
     
-    # Load optimizer state
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    epoch = checkpoint['epoch']
+    print(f"Resuming from epoch {epoch + 1}")
+    return epoch + 1
+
+def train_one_epoch_dil(model, train_loaders, optimizer, criterion, device):
+    """Train DIL model for one epoch across all domains"""
+    if isinstance(model, dict):
+        for m in model.values():
+            m.train()
+    else:
+        model.train()
     
-    print(f"Loaded checkpoint from {path} at epoch {checkpoint['epoch']}")
+    total_loss = 0.0
+    total_correct = 0
+    total_samples = 0
+    start_time = time.time()
     
-    return checkpoint['epoch']
+    # Train on each domain
+    for domain, dataloader in train_loaders.items():
+        print(f"Training on domain: {domain}")
+        
+        for batch_idx, (images, labels) in enumerate(tqdm(dataloader, desc=f"Training {domain}", leave=False)):
+            images, labels = images.to(device), labels.to(device)
+            
+            optimizer.zero_grad()
+            
+            if isinstance(model, dict):
+                # Ensemble case
+                outputs = []
+                for model_name, single_model in model.items():
+                    if hasattr(single_model.base_model, 'text_encoder'):
+                        # EAML model needs text inputs
+                        batch_size = images.size(0)
+                        dummy_input_ids = torch.zeros((batch_size, 10), dtype=torch.long).to(device)
+                        dummy_attention_mask = torch.ones((batch_size, 10), dtype=torch.long).to(device)
+                        output = single_model(images, domain, input_ids=dummy_input_ids, 
+                                            attention_mask=dummy_attention_mask)
+                    else:
+                        output = single_model(images, domain)
+                    outputs.append(output)
+                final_output = torch.stack(outputs).mean(dim=0)
+            else:
+                # Single model case
+                if hasattr(model.base_model, 'text_encoder'):
+                    # EAML model
+                    batch_size = images.size(0)
+                    dummy_input_ids = torch.zeros((batch_size, 10), dtype=torch.long).to(device)
+                    dummy_attention_mask = torch.ones((batch_size, 10), dtype=torch.long).to(device)
+                    final_output = model(images, domain, input_ids=dummy_input_ids, 
+                                       attention_mask=dummy_attention_mask)
+                else:
+                    final_output = model(images, domain)
+            
+            loss = criterion(final_output, labels)
+            loss.backward()
+            optimizer.step()
+            
+            # Calculate metrics
+            _, predicted = final_output.max(1)
+            total_loss += loss.item() * images.size(0)
+            total_correct += predicted.eq(labels).sum().item()
+            total_samples += labels.size(0)
+    
+    avg_loss = total_loss / total_samples
+    avg_acc = total_correct / total_samples
+    epoch_time = time.time() - start_time
+    
+    print(f"Training - Loss: {avg_loss:.4f}, Accuracy: {avg_acc:.4f}, Time: {epoch_time:.2f}s")
+    return avg_loss, avg_acc
+
+def evaluate_dil(model, val_loaders, device):
+    """Evaluate DIL model across all domains"""
+    if isinstance(model, dict):
+        for m in model.values():
+            m.eval()
+    else:
+        model.eval()
+    
+    total_correct = 0
+    total_samples = 0
+    
+    with torch.no_grad():
+        for domain, dataloader in val_loaders.items():
+            print(f"Evaluating domain: {domain}")
+            
+            for images, labels in tqdm(dataloader, desc=f"Evaluating {domain}", leave=False):
+                images, labels = images.to(device), labels.to(device)
+                
+                if isinstance(model, dict):
+                    # Ensemble case
+                    outputs = []
+                    for model_name, single_model in model.items():
+                        if hasattr(single_model.base_model, 'text_encoder'):
+                            batch_size = images.size(0)
+                            dummy_input_ids = torch.zeros((batch_size, 10), dtype=torch.long).to(device)
+                            dummy_attention_mask = torch.ones((batch_size, 10), dtype=torch.long).to(device)
+                            output = single_model(images, domain, input_ids=dummy_input_ids, 
+                                                attention_mask=dummy_attention_mask)
+                        else:
+                            output = single_model(images, domain)
+                        outputs.append(output)
+                    final_output = torch.stack(outputs).mean(dim=0)
+                else:
+                    # Single model case
+                    if hasattr(model.base_model, 'text_encoder'):
+                        batch_size = images.size(0)
+                        dummy_input_ids = torch.zeros((batch_size, 10), dtype=torch.long).to(device)
+                        dummy_attention_mask = torch.ones((batch_size, 10), dtype=torch.long).to(device)
+                        final_output = model(images, domain, input_ids=dummy_input_ids, 
+                                           attention_mask=dummy_attention_mask)
+                    else:
+                        final_output = model(images, domain)
+                
+                _, predicted = final_output.max(1)
+                total_correct += predicted.eq(labels).sum().item()
+                total_samples += labels.size(0)
+    
+    accuracy = total_correct / total_samples
+    print(f"Overall Validation Accuracy: {accuracy:.4f}")
+    return accuracy

@@ -1,231 +1,204 @@
-#!/usr/bin/env python3
-import os
 import argparse
 import torch
+import os
 import time
-from typing import Dict, List
+from torch import nn
+from pathlib import Path
 
-from utils.domain_IL.dil_dataset import get_all_domains_loaders
+# Import DIL-specific modules
+from utils.domain_IL.dil_dataloader import DILDataLoader
 from utils.domain_IL.dil_model_loader import prepare_dil_models
 from utils.domain_IL.dil_train_utils import (
     train_one_epoch_dil,
     evaluate_dil,
     save_checkpoint_dil,
     load_checkpoint_dil,
-    DILMetrics
+    set_finetune_mode
 )
-from utils.domain_IL.dil_utils import (
-    StandardDomainIL,
-    DistillationDomainIL,
-    EWC,
-    extract_features
-)
-from utils.domain_IL.adaptive_lr import AdaptiveLR
-from utils.domain_IL.evm_classifier import EVMDomainClassifier
 
-def main():
+def parse_class_counts(class_counts_str, domain_list, default_classes):
+    """Parse class counts string or use defaults"""
+    if class_counts_str:
+        class_counts = {}
+        for item in class_counts_str.split(','):
+            domain, count = item.split(':')
+            class_counts[domain] = int(count)
+        return class_counts
+    else:
+        return {domain: default_classes for domain in domain_list}
+
+def main(args):
+    start_time = time.time()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    
+    # Create checkpoint directory
+    os.makedirs(args.ckpt_dir, exist_ok=True)
+    
+    ## ---------------------- Loading Class Info ------------------------------ ##
+    if args.class_list_path:
+        import json
+        with open(args.class_list_path) as f:
+            class_list = json.load(f)
+    else:
+        class_list = None  # fallback to auto-detect
+    
+    ## ---------------------- Data Loading ------------------------------------ ##
+    print("=== Loading Data ===")
+    data_start = time.time()
+    
+    # Use DIL DataLoader for domain-specific loading
+    dil_loader = DILDataLoader(
+        data_root=args.data_dir,
+        domain_list=args.domain_list,
+        batch_size=args.batch_size,
+        img_size=(224, 224),
+        num_workers=4
+    )
+    
+    # Get loaders for each domain
+    train_loaders = dil_loader.get_domain_loaders('train')
+    val_loaders = dil_loader.get_domain_loaders('val')
+    
+    if not train_loaders:
+        raise ValueError("No training data found. Check domain paths and directory structure.")
+    
+    # Get class counts
+    class_counts = parse_class_counts(args.class_counts, args.domain_list, args.num_classes)
+    
+    print(f"Class counts: {class_counts}")
+    print(f"Data loaded in {time.time() - data_start:.2f}s")
+    
+    ## ---------------------- Model Preparation ------------------------------- ##
+    print("=== Preparing Models ===")
+    
+    # Prepare configuration for model loading
+    model_config = {
+        'strategy': f'{args.model}_only',
+        'eaml_ckpt': args.eaml_path,
+        'doc_ckpt': args.docformer_path,
+        'dil_mode': True
+    }
+    
+    # Handle ensemble case
+    if args.ensemble_first and args.model == "both":
+        model_config['strategy'] = 'pre_ensemble'
+    elif args.model == "both":
+        model_config['strategy'] = 'post_ensemble'
+    
+    # Load and prepare models
+    model = prepare_dil_models(model_config, class_counts, device)
+    
+    # Set fine-tuning mode AFTER model preparation
+    print(f"Setting finetune mode: {args.finetune_mode}")
+    if isinstance(model, dict):
+        for single_model in model.values():
+            set_finetune_mode(single_model, mode=args.finetune_mode, 
+                            encoder_unfreeze_depth=args.unfreeze_depth)
+    else:
+        set_finetune_mode(model, mode=args.finetune_mode, 
+                         encoder_unfreeze_depth=args.unfreeze_depth)
+    
+    ## ---------------------- Training Setup ---------------------------------- ##
+    print("=== Setting up Training ===")
+    
+    # Setup optimizer - collect trainable parameters
+    if isinstance(model, dict):
+        all_params = []
+        for single_model in model.values():
+            trainable_params = [p for p in single_model.parameters() if p.requires_grad]
+            all_params.extend(trainable_params)
+            print(f"Model {type(single_model).__name__}: {len(trainable_params)} trainable parameters")
+    else:
+        all_params = [p for p in model.parameters() if p.requires_grad]
+        print(f"Model {type(model).__name__}: {len(all_params)} trainable parameters")
+    
+    # Check if we have trainable parameters
+    if len(all_params) == 0:
+        print("ERROR: No trainable parameters found!")
+        print("Model structure:")
+        if isinstance(model, dict):
+            for name, single_model in model.items():
+                print(f"  {name}: {type(single_model).__name__}")
+                for param_name, param in single_model.named_parameters():
+                    print(f"    {param_name}: requires_grad={param.requires_grad}")
+        else:
+            for param_name, param in model.named_parameters():
+                print(f"  {param_name}: requires_grad={param.requires_grad}")
+        raise ValueError("No trainable parameters found. Check finetune_mode setting.")
+    
+    print(f"Total trainable parameters: {sum(p.numel() for p in all_params):,}")
+    
+    optimizer = torch.optim.Adam(all_params, lr=args.lr)
+    criterion = nn.CrossEntropyLoss()
+    
+    # Load checkpoint if exists
+    checkpoint_path = os.path.join(args.ckpt_dir, f"{args.model}_dil.pth")
+    start_epoch = load_checkpoint_dil(model, optimizer, checkpoint_path, device)
+    
+    ## ---------------------- Training Loop ----------------------------------- ##
+    print("=== Starting Training ===")
+    best_acc = 0.0
+    
+    for epoch in range(start_epoch, args.epochs):
+        print(f"\n=== Epoch {epoch+1}/{args.epochs} ===")
+        epoch_start = time.time()
+        
+        # Training
+        train_loss, train_acc = train_one_epoch_dil(
+            model, train_loaders, optimizer, criterion, device
+        )
+        
+        # Validation
+        val_acc = evaluate_dil(model, val_loaders, device)
+        
+        # Save checkpoint
+        save_checkpoint_dil(model, optimizer, epoch, checkpoint_path)
+        
+        # Save best model
+        if val_acc > best_acc:
+            best_acc = val_acc
+            best_path = os.path.join(args.ckpt_dir, f"{args.model}_best.pth")
+            save_checkpoint_dil(model, optimizer, epoch, best_path)
+            print(f"✓ New best model saved: {best_acc:.4f}")
+        
+        epoch_time = time.time() - epoch_start
+        print(f"Epoch {epoch+1} completed in {epoch_time:.2f}s")
+        print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, Val Acc: {val_acc:.4f}")
+    
+    total_time = time.time() - start_time
+    print(f"\n=== Training Completed ===")
+    print(f"Total time: {total_time:.2f}s")
+    print(f"Best validation accuracy: {best_acc:.4f}")
+
+if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Domain Incremental Learning")
-    
-    # Data arguments
-    parser.add_argument("--data_dir", required=True,
-                      help="Root directory containing domain folders")
+    parser.add_argument("--data_dir", type=str, required=True,
+                       help="Root directory containing domain subdirectories")
     parser.add_argument("--domain_list", nargs="+", required=True,
-                      help="List of domain names to process incrementally")
-    parser.add_argument("--class_counts", type=str, required=True,
-                      help="Comma-separated domain:class_count pairs")
-    
-    # Model arguments
-    parser.add_argument("--model_name", choices=["eaml", "docformer"], 
-                      default="eaml", help="Base model type")
-    parser.add_argument("--base_model_path", type=str, required=True,
-                      help="Path to base model checkpoint")
-    
-    # Training arguments
-    parser.add_argument("--checkpoint_dir", default="checkpoints/dil")
+                       help="List of domain names (subdirectory names)")
+    parser.add_argument("--class_counts", type=str,
+                       help="Domain-specific class counts (format: domain1:16,domain2:16)")
+    parser.add_argument("--ckpt_dir", type=str, default="./checkpoints_dil")
+    parser.add_argument("--eaml_path", type=str, default="")
+    parser.add_argument("--docformer_path", type=str, default="")
+    parser.add_argument("--model", choices=["eaml", "docformer", "both"], default="eaml")
+    parser.add_argument("--ensemble_first", action="store_true", 
+                       help="Use pre-ensemble (only valid with --model both)")
     parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--epochs", type=int, default=10)
-    
-    # DIL strategy
-    parser.add_argument("--strategy", choices=["standard", "distillation"],
-                      default="distillation")
-    parser.add_argument("--temperature", type=float, default=2.0)
-    parser.add_argument("--lambda_distill", type=float, default=1.0)
-    
-    # Catastrophic forgetting mitigation
-    parser.add_argument("--use_ewc", action="store_true")
-    parser.add_argument("--lambda_ewc", type=float, default=5000.0)
-    parser.add_argument("--use_exemplars", action="store_true")
-    parser.add_argument("--max_exemplars", type=int, default=200)
-    
-    # EVM domain detection
-    parser.add_argument("--use_evm", action="store_true")
-    parser.add_argument("--evm_tailsize", type=float, default=0.5)
-    parser.add_argument("--evm_threshold", type=float, default=0.7)
-    
-    # Training mode
-    parser.add_argument("--training_mode", choices=["head_only", "partial", "full"],
-                      default="head_only")
-    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--finetune_mode", choices=["head_only", "partial_finetune", "full_finetune"], 
+                       default="head_only")
+    parser.add_argument("--unfreeze_depth", type=int, default=2)
+    parser.add_argument("--class_list_path", type=str,
+                       help="Optional path to JSON file with class list")
+    parser.add_argument("--num_classes", type=int, default=16,
+                       help="Default number of classes per domain")
     
     args = parser.parse_args()
     
-    # Setup device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Create checkpoint directory
+    Path(args.ckpt_dir).mkdir(parents=True, exist_ok=True)
     
-    # Parse class counts
-    class_counts = {}
-    for pair in args.class_counts.split(','):
-        domain, count = pair.split(':')
-        class_counts[domain] = int(count)
-    
-    # Initialize metrics
-    metrics = DILMetrics()
-    
-    # Initialize strategy
-    strategy = DistillationDomainIL(device, args.temperature, args.lambda_distill) \
-               if args.strategy == "distillation" else StandardDomainIL(device)
-    
-    # Initialize EVM
-    evm = EVMDomainClassifier(args.evm_tailsize, args.evm_threshold) if args.use_evm else None
-    
-    # Setup domains
-    domains = [{"name": d, "path": os.path.join(args.data_dir, d)} 
-              for d in args.domain_list]
-    
-    # Get data loaders
-    print("Loading datasets...")
-    data_loaders = get_all_domains_loaders(domains, args.batch_size)
-    
-    # Load and prepare base model
-    print(f"Loading base model: {args.model_name}")
-    model_config = {
-        "strategy": args.model_name,
-        "eaml_ckpt": args.base_model_path if args.model_name == "eaml" else "",
-        "doc_ckpt": args.base_model_path if args.model_name == "docformer" else "",
-        "dil_mode": True
-    }
-    model = prepare_dil_models(model_config, class_per_domain=class_counts, device=device)
-    
-    # Training loop for each domain
-    for idx, (domain_name, loader) in enumerate(data_loaders):
-        print(f"\n=== Training on domain: {domain_name} ({idx+1}/{len(data_loaders)}) ===")
-        
-        # Update metrics tracker
-        metrics.add_domain(domain_name)
-        
-        # Get the current domain's data
-        train_loader = loader[0] if isinstance(loader, tuple) else loader
-        val_loader = loader[1] if isinstance(loader, tuple) else None
-        
-        # Setup for this domain
-        if idx > 0:
-            # Create a copy of the current model for distillation
-            old_model = prepare_dil_models(model_config, class_per_domain=class_counts, device=device)
-            # Load weights
-            old_ckpt_path = os.path.join(args.checkpoint_dir, f"{args.domain_list[idx-1]}.pth")
-            if os.path.exists(old_ckpt_path):
-                checkpoint = torch.load(old_ckpt_path, map_location=device)
-                if "model_state_dict" in checkpoint:
-                    old_model.load_state_dict(checkpoint["model_state_dict"])
-                else:
-                    old_model.load_state_dict(checkpoint)
-            old_model.eval()
-            
-            # Add new domain head
-            model = strategy.adapt_model(model, args.domain_list[:idx], domain_name)
-            
-            # Setup EWC if enabled
-            ewc = None
-            if args.use_ewc:
-                prev_domain = args.domain_list[idx-1]
-                prev_loader = data_loaders[idx-1][1]
-                ewc = EWC(old_model, prev_loader, device, args.lambda_ewc)
-        else:
-            old_model = None
-            ewc = None
-        
-        # Setup training mode
-        if args.training_mode == "head_only":
-            for param in model.base_model.parameters():
-                param.requires_grad = False
-        elif args.training_mode == "partial":
-            # Freeze most layers except last few
-            for param in model.base_model.parameters():
-                param.requires_grad = False
-            # Unfreeze last few layers - this is model specific
-            if hasattr(model.base_model, 'encoder'):
-                for layer in model.base_model.encoder.layer[-2:]:  # Last 2 layers
-                    for param in layer.parameters():
-                        param.requires_grad = True
-                
-        # All parameters trainable in "full" mode (default PyTorch behavior)
-        
-        # Setup optimizer
-        optimizer = torch.optim.AdamW(
-            filter(lambda p: p.requires_grad, model.parameters()), 
-            lr=args.lr
-        )
-        
-        # Setup learning rate scheduler
-        lr_scheduler = AdaptiveLR(optimizer, base_lr=args.lr)
-        
-        # Resume from checkpoint if needed
-        start_epoch = 0
-        if args.resume:
-            ckpt_path = os.path.join(args.checkpoint_dir, f"{domain_name}.pth")
-            if os.path.exists(ckpt_path):
-                start_epoch = load_checkpoint_dil(model, optimizer, ckpt_path, device)
-                print(f"Resuming from epoch {start_epoch}")
-        
-        # Training loop
-        criterion = torch.nn.CrossEntropyLoss()
-        
-        for epoch in range(start_epoch, args.epochs):
-            print(f"\nEpoch {epoch+1}/{args.epochs}")
-            
-            # Train
-            train_metrics = train_one_epoch_dil(
-                model, train_loader, domain_name, optimizer, 
-                criterion, device, strategy, old_model, ewc
-            )
-            
-            # Evaluate
-            if val_loader:
-                val_metrics = evaluate_dil(
-                    model, val_loader, domain_name, device, metrics, evm
-                )
-                
-                # Update learning rate
-                lr_adjusted = lr_scheduler.step(val_metrics)
-                if lr_adjusted:
-                    print(f"Learning rate adjusted to {lr_scheduler.get_lr()}")
-            
-            # Save checkpoint
-            save_checkpoint_dil(
-                model, optimizer, epoch, 
-                os.path.join(args.checkpoint_dir, f"{domain_name}_epoch{epoch}.pth")
-            )
-        
-        # Final checkpoint for this domain
-        save_checkpoint_dil(
-            model, optimizer, args.epochs,
-            os.path.join(args.checkpoint_dir, f"{domain_name}.pth")
-        )
-        
-        # Update EVM classifier if enabled
-        if args.use_evm:
-            print(f"Updating EVM classifier with domain {domain_name}")
-            features = extract_features(model, train_loader, device, domain_name)
-            
-            if idx == 0:
-                # First domain, fit EVM from scratch
-                evm.fit(features)
-            else:
-                # Incremental update for new domain
-                evm.incremental_update({domain_name: features[domain_name]})
-    
-    print("Domain Incremental Learning completed successfully!")
-
-if __name__ == "__main__":
-    main()
+    main(args)
