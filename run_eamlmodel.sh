@@ -1,6 +1,6 @@
 #!/bin/bash -l
 
-#SBATCH --job-name=eaml_training          # Job name
+#SBATCH --job-name=eamlsmall_training          # Job name
 #SBATCH --output=logs/%x_%j.out           # Standard output log
 #SBATCH --error=logs/%x_%j.err            # Error log
 #SBATCH --partition=v100                  # GPU partition name
@@ -44,13 +44,13 @@ fi
 python src/sota_eaml_model.py \
   --data_dir /home/woody/iwi5/iwi5280h/dataset/small_dataset \
   --output_dir $OUTPUT_DIR \
-  --num_epochs 100 \
+  --num_epochs 300 \
   --batch_size 8 \
-  --learning_rate 5e-4 \
+  --learning_rate 1e-4 \
   --weight_decay 0.005 \
   --classes $CLASSES \
   --device cuda \
-  --patience 10 \
+  --patience 30 \
   --keep_checkpoints 2 \
   --cls_weight 1.0 \
   --kld_weight 0.3 \
@@ -65,3 +65,4 @@ echo "Training Completed. Output: $SLURM_OUTPUT"
 
 #sbatch run_eamlmodel.sh
 #--data_dir /home/woody/iwi5/iwi5280h/dataset/prepdata \
+#--data_dir /home/woody/iwi5/iwi5280h/dataset/small_dataset \
