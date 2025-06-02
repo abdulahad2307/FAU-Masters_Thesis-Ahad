@@ -24,114 +24,68 @@ export https_proxy=http://proxy:80
 # Move to the repository folder
 export PYTHONPATH=$PYTHONPATH:$(pwd)/FAU-Masters_Thesis-Ahad
 
-#echo "Starting CIL Test Run..."
-
-# Test with just 3 classes in incremental steps
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export CUDA_LAUNCH_BLOCKING=1
 
 # Domain Incremental Learning Configuration
 DATA_DIR="/home/woody/iwi5/iwi5280h/dataset/"
 CHECKPOINT_DIR="checkpoints/domain_il_evm"
-EAML_MODEL_PATH="/home/hpc/iwi5/iwi5280h/projects/FAU-Masters_Thesis-Ahad/outputs/eaml_20250511_160135/eaml_best_model.pt"
+EAML_MODEL_PATH="/home/hpc/iwi5/iwi5280h/projects/FAU-Masters_Thesis-Ahad/outputs/eaml_20250601_175404/eaml_best_model.pt"
 DOCFORMER_MODEL_PATH=""
 
-# EVM Configuration
-USE_EVM=true                              # Set to false to disable EVM
-EVM_TAILSIZE=0.5
-EVM_THRESHOLD=0.7
-EVM_UPDATE_FREQ=3
-
-# Create checkpoint directory
-mkdir -p "${CHECKPOINT_DIR}"
-
-# Print system information
-echo "========================================="
-echo "Domain Incremental Learning with EVM"
-echo "========================================="
-echo "Job ID: ${SLURM_JOB_ID}"
-echo "Node: ${SLURMD_NODENAME}"
-echo "Start Time: $(date)"
-echo "EVM Enabled: ${USE_EVM}"
-echo ""
-
-# GPU Information
-echo "=== GPU Information ==="
-nvidia-smi -L
-echo ""
-
-# Validate data directories
+# Validate data directories exist
 echo "=== Validating Data Directories ==="
-for domain in small_dataset small_dataset2; do
-    if [ ! -d "${DATA_DIR}/${domain}" ]; then
-        echo "ERROR: ${domain} directory not found at ${DATA_DIR}/${domain}"
-        exit 1
-    fi
-    echo "${domain} directory found"
-done
+if [ ! -d "${DATA_DIR}/small_dataset" ]; then
+    echo "ERROR: small_dataset directory not found at ${DATA_DIR}/small_dataset"
+    exit 1
+fi
 
-echo "Data validation completed"
+if [ ! -d "${DATA_DIR}/small_dataset2" ]; then
+    echo "ERROR: small_dataset2 directory not found at ${DATA_DIR}/small_dataset2"
+    exit 1
+fi
+
+echo "small_dataset directory found"
+echo "small_dataset2 directory found"
 echo ""
 
-echo "=== Starting Domain Incremental Learning with EVM ==="
+echo "========================================="
+echo "Starting Domain Incremental Learning WITH EVM"
+echo "Data Directory: ${DATA_DIR}"
+echo "Device: $(nvidia-smi -L)"
+echo "========================================="
 
-# Build command with EVM options
-CMD="python src/domain_incremental_evm.py \
-  --data_dir \"${DATA_DIR}\" \
+python src/domain_incremental_evm.py \
+  --data_dir "${DATA_DIR}" \
   --domain_list small_dataset small_dataset2 \
-  --class_counts \"small_dataset:16,small_dataset2:16\" \
-  --ckpt_dir \"${CHECKPOINT_DIR}\" \
-  --eaml_path \"${EAML_MODEL_PATH}\" \
-  --docformer_path \"${DOCFORMER_MODEL_PATH}\" \
+  --class_counts "small_dataset:16,small_dataset2:16" \
+  --ckpt_dir "${CHECKPOINT_DIR}" \
+  --eaml_path "${EAML_MODEL_PATH}" \
+  --docformer_path "${DOCFORMER_MODEL_PATH}" \
   --model eaml \
   --batch_size 16 \
-  --epochs 200 \
+  --epochs 300 \
   --lr 1e-4 \
-  --finetune_mode head_only \
-  --num_classes 16"
+  --finetune_mode partial_finetune \
+  --unfreeze_depth 2 \
+  --num_classes 16 \
+  --evm_tailsize 0.5 \
+  --evm_threshold 0.7 \
+  --evm_update_freq 5 \
+  --full_model_acc 0.7775
 
-# Add EVM parameters if enabled
-if [ "$USE_EVM" = true ]; then
-    CMD="$CMD \
-  --use_evm \
-  --evm_tailsize ${EVM_TAILSIZE} \
-  --evm_threshold ${EVM_THRESHOLD} \
-  --evm_update_freq ${EVM_UPDATE_FREQ}"
-fi
-
-# Execute the command
-eval $CMD
-
-# Check exit status
-exit_code=$?
-if [ $exit_code -eq 0 ]; then
-    echo ""
-    echo "========================================="
-    echo "Domain Incremental Learning Completed Successfully"
-    echo "Training Duration: $SECONDS seconds"
-    echo "Checkpoints saved in: ${CHECKPOINT_DIR}"
-    echo "End Time: $(date)"
-    
-    # List generated checkpoints
-    echo ""
-    echo "=== Generated Checkpoints ==="
-    ls -la "${CHECKPOINT_DIR}/"
-    
-else
-    echo ""
-    echo "========================================="
-    echo "Domain Incremental Learning FAILED"
-    echo "Exit Code: $exit_code"
-    echo "Check logs for details"
-fi
 
 echo "========================================="
-exit $exit_code
+echo "Domain Incremental Learning WITH EVM Completed"
+echo "Checkpoints saved in: ${CHECKPOINT_DIR}"
+
 
 
 
 # To run:
 # sbatch run_domainIL_evm.sh
-# sbatch dil_test_run.sh
 
 #--data_dir /home/woody/iwi5/iwi5280h/dataset/prepdata \
+
+# 1. --base_model_path /home/hpc/iwi5/iwi5280h/projects/FAU-Masters_Thesis-Ahad/outputs/eaml_20250511_160135/eaml_best_model.pt\
+# 2. --base_model_path /home/hpc/iwi5/iwi5280h/projects/FAU-Masters_Thesis-Ahad/outputs/eaml_20250601_175404/eaml_best_model.pt\

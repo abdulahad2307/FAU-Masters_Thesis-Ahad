@@ -24,16 +24,13 @@ export https_proxy=http://proxy:80
 # Move to the repository folder
 export PYTHONPATH=$PYTHONPATH:$(pwd)/FAU-Masters_Thesis-Ahad
 
-#echo "Starting CIL Test Run..."
-
-# Test with just 3 classes in incremental steps
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export CUDA_LAUNCH_BLOCKING=1
 
 # Domain Incremental Learning Configuration
 DATA_DIR="/home/woody/iwi5/iwi5280h/dataset/"
 CHECKPOINT_DIR="checkpoints/domain_il"
-EAML_MODEL_PATH="/home/hpc/iwi5/iwi5280h/projects/FAU-Masters_Thesis-Ahad/outputs/eaml_20250511_160135/eaml_best_model.pt"
+EAML_MODEL_PATH="/home/hpc/iwi5/iwi5280h/projects/FAU-Masters_Thesis-Ahad/outputs/eaml_20250601_175404/eaml_best_model.pt"
 DOCFORMER_MODEL_PATH=""
 
 # Validate data directories exist
@@ -53,7 +50,7 @@ echo "small_dataset2 directory found"
 echo ""
 
 echo "========================================="
-echo "Starting Domain Incremental Learning"
+echo "Starting Domain Incremental Learning (NO EVM)"
 echo "Data Directory: ${DATA_DIR}"
 echo "Device: $(nvidia-smi -L)"
 echo "========================================="
@@ -67,21 +64,24 @@ python src/domain_incremental.py \
   --docformer_path "${DOCFORMER_MODEL_PATH}" \
   --model eaml \
   --batch_size 16 \
-  --epochs 200 \
-  --lr 1e-3 \
-  --finetune_mode head_only \
-  --num_classes 16
+  --epochs 300 \
+  --lr 1e-4 \
+  --finetune_mode partial_finetune \
+  --unfreeze_depth 2 \
+  --num_classes 16 \
+  --full_model_acc 0.7775
 
 
 echo "========================================="
-
-echo "Domain Incremental Learning Completed"
+echo "Domain Incremental Learning (NO EVM) Completed"
 echo "Checkpoints saved in: ${CHECKPOINT_DIR}"
 
 
 
 # To run:
 # sbatch run_domainIL.sh
-# sbatch dil_test_run.sh
 
 #--data_dir /home/woody/iwi5/iwi5280h/dataset/prepdata \
+
+# 1. --base_model_path /home/hpc/iwi5/iwi5280h/projects/FAU-Masters_Thesis-Ahad/outputs/eaml_20250511_160135/eaml_best_model.pt\
+# 2. --base_model_path /home/hpc/iwi5/iwi5280h/projects/FAU-Masters_Thesis-Ahad/outputs/eaml_20250601_175404/eaml_best_model.pt\

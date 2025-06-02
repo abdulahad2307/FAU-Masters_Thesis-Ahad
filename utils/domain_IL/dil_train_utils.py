@@ -211,9 +211,8 @@ def train_one_epoch_dil(model, train_loaders, optimizer, criterion, device):
     
     print(f"Training - Loss: {avg_loss:.4f}, Accuracy: {avg_acc:.4f}, Time: {epoch_time:.2f}s")
     return avg_loss, avg_acc
-
+"""
 def evaluate_dil(model, val_loaders, device):
-    """Evaluate DIL model across all domains"""
     if isinstance(model, dict):
         for m in model.values():
             m.eval()
@@ -260,5 +259,109 @@ def evaluate_dil(model, val_loaders, device):
                 total_samples += labels.size(0)
     
     accuracy = total_correct / total_samples
+    print(f"Overall Validation Accuracy: {accuracy:.4f}")
+    return accuracy
+"""
+
+def evaluate_dil(
+    model, 
+    val_loaders, 
+    device, 
+    evm_classifier=None, 
+    use_evm=False, 
+    class_name_to_idx=None
+):
+    """
+    Evaluate model or EVM on all domains.
+
+    Args:
+        model: PyTorch model or dict of models (ensemble)
+        val_loaders: dict of domain_name -> DataLoader
+        device: torch device
+        evm_classifier: EVM classifier instance (optional)
+        use_evm: bool, whether to use EVM for predictions
+        class_name_to_idx: dict mapping class names to indices (for EVM, optional)
+
+    Returns:
+        overall_accuracy: float
+    """
+    if isinstance(model, dict):
+        for m in model.values():
+            m.eval()
+    else:
+        model.eval()
+    
+    total_correct = 0
+    total_samples = 0
+
+    with torch.no_grad():
+        for domain, dataloader in val_loaders.items():
+            print(f"Evaluating domain: {domain}")
+            domain_correct = 0
+            domain_total = 0
+
+            for images, labels in tqdm(dataloader, desc=f"Evaluating {domain}", leave=False):
+                images, labels = images.to(device), labels.to(device)
+
+                if use_evm and evm_classifier is not None:
+                    # Extract features for EVM
+                    if isinstance(model, dict):
+                        # Use the first model for features
+                        feature_model = list(model.values())[0]
+                    else:
+                        feature_model = model
+
+                    if hasattr(feature_model, 'forward_features'):
+                        features = feature_model.forward_features(images, domain)
+                    else:
+                        # fallback: use logits as features
+                        features = feature_model(images, domain)
+                    if isinstance(features, dict) and 'logits' in features:
+                        features = features['logits']
+                    if len(features.shape) > 2:
+                        features = features.view(features.size(0), -1)
+                    features_np = features.cpu().numpy()
+                    evm_preds, _ = evm_classifier.predict(features_np)
+                    # If EVM returns class names, map to indices
+                    if class_name_to_idx is not None:
+                        evm_preds = [class_name_to_idx.get(str(p), -1) for p in evm_preds]
+                    preds = torch.tensor(evm_preds, device=device)
+                else:
+                    # Standard model prediction (with ensemble support)
+                    if isinstance(model, dict):
+                        outputs = []
+                        for model_name, single_model in model.items():
+                            if hasattr(single_model.base_model, 'text_encoder'):
+                                batch_size = images.size(0)
+                                dummy_input_ids = torch.zeros((batch_size, 10), dtype=torch.long).to(device)
+                                dummy_attention_mask = torch.ones((batch_size, 10), dtype=torch.long).to(device)
+                                output = single_model(images, domain, input_ids=dummy_input_ids, 
+                                                    attention_mask=dummy_attention_mask)
+                            else:
+                                output = single_model(images, domain)
+                            outputs.append(output)
+                        final_output = torch.stack(outputs).mean(dim=0)
+                    else:
+                        if hasattr(model.base_model, 'text_encoder'):
+                            batch_size = images.size(0)
+                            dummy_input_ids = torch.zeros((batch_size, 10), dtype=torch.long).to(device)
+                            dummy_attention_mask = torch.ones((batch_size, 10), dtype=torch.long).to(device)
+                            final_output = model(images, domain, input_ids=dummy_input_ids, 
+                                               attention_mask=dummy_attention_mask)
+                        else:
+                            final_output = model(images, domain)
+                    if isinstance(final_output, dict) and 'logits' in final_output:
+                        final_output = final_output['logits']
+                    _, preds = final_output.max(1)
+
+                domain_correct += preds.eq(labels).sum().item()
+                domain_total += labels.size(0)
+
+            acc = domain_correct / domain_total if domain_total > 0 else 0
+            print(f"Domain '{domain}' Accuracy: {acc:.4f}")
+            total_correct += domain_correct
+            total_samples += domain_total
+
+    accuracy = total_correct / total_samples if total_samples > 0 else 0
     print(f"Overall Validation Accuracy: {accuracy:.4f}")
     return accuracy
