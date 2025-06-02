@@ -463,23 +463,22 @@ class AdaptiveLR:
             param_group['lr'] = adjusted_lr
 
 def extract_features(model, dataloader, device):
-    """Extract features for EVM classifier"""
+    """
+    Extract features for EVM classifier in a model-agnostic way.
+    Returns: Dict[class_name, np.ndarray of features]
+    """
     model.eval()
     features = {}
-    
     with torch.no_grad():
         for batch in dataloader:
             if "images" in batch:  # EAML
                 images = batch['images'].to(device)
                 texts = {k: v.to(device) for k, v in batch['texts'].items()}
                 labels = batch['labels'].to(device)
-                
-                # Extract features
+                # Prefer model.extract_features if available
                 if hasattr(model, 'extract_features'):
                     batch_features = model.extract_features(images=images, texts=texts)
                 else:
-                    # If no explicit feature extraction method, use the penultimate layer
-                    # This is model-specific and might need adjustment
                     outputs = model(images=images, texts=texts, return_features=True)
                     batch_features = outputs['fused_feat']
             else:  # DocFormer
@@ -490,20 +489,15 @@ def extract_features(model, dataloader, device):
                     'bboxes': batch['bboxes'].to(device)
                 }
                 labels = batch['labels'].to(device)
-                
-                # Extract features (model-specific implementation)
                 outputs = model(**inputs, task="classification")
                 batch_features = outputs['features'] if 'features' in outputs else outputs['logits']
-            
             # Group features by class
             for i, label in enumerate(labels.cpu().numpy()):
                 class_name = dataloader.dataset.current_classes[label]
                 if class_name not in features:
                     features[class_name] = []
                 features[class_name].append(batch_features[i].cpu().numpy())
-    
     # Convert lists to numpy arrays
     for class_name in features:
         features[class_name] = np.vstack(features[class_name])
-    
     return features

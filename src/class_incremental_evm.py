@@ -9,16 +9,17 @@ from utils.docformer.model import DocFormer
 from utils.docformer.config import DocFormerConfig
 from utils.class_IL.dataloader_utils import get_class_il_loader
 from utils.class_IL.train_utils import (
-    save_checkpoint, load_checkpoint, train_one_epoch_cil, evaluate, CILMetrics
+    save_checkpoint, load_checkpoint, evaluate, CILMetrics, train_one_epoch_cil
 )
 from utils.class_IL.cil_utils import (
-    StandardIncremental, DistillationIncremental, EWC, ExemplarManager, AdaptiveLR
+    StandardIncremental, DistillationIncremental, EWC, ExemplarManager, AdaptiveLR, extract_features
 )
 from utils.class_IL.training_modes import get_training_mode
+from utils.evm.evm_classifier import EVMClassifier
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def run_incremental_learning(
+def run_incremental_learning_evm(
     data_root: str,
     class_order: List[str],
     base_model_path: str,
@@ -39,13 +40,15 @@ def run_incremental_learning(
     training_mode: str = "last_layer",
     trainable_layers: Optional[List[str]] = None,
     resume_checkpoint: Optional[str] = None,
-    full_model_acc: Optional[float] = None,
+    evm_tailsize: float = 0.5,
+    evm_threshold: float = 0.7,
+    full_model_acc: float = 0.0,
     weight_decay: float = 1e-4
 ):
     os.makedirs(checkpoint_dir, exist_ok=True)
-    #print("Starting Class Incremental Learning...")
+    print("Starting Class Incremental Learning with EVM...")
 
-    initial_classes = class_order[: start_step + 1] if start_step > 0 else [class_order[0]]
+    initial_classes = class_order[:start_step + 1] if start_step > 0 else [class_order[0]]
     metrics = CILMetrics(initial_classes)
 
     if strategy == "distillation":
@@ -62,9 +65,10 @@ def run_incremental_learning(
     best_model_path = None
     old_model = None
     ewc = None
+    evm = EVMClassifier(tailsize=evm_tailsize, cover_threshold=evm_threshold)
 
     for step in range(start_step, len(class_order)):
-        current = class_order[: step + 1]
+        current = class_order[:step + 1]
         previous = class_order[:step]
         new_cls = [class_order[step]] if step > start_step else []
 
@@ -98,8 +102,11 @@ def run_incremental_learning(
 
         # Prepare old_model & EWC after first step
         if step > start_step:
-            old_model = EAMLModel(num_classes=len(previous)).to(DEVICE) \
-                if model_name == "eaml" else DocFormer(cfg, num_classes=len(previous)).to(cfg.device)
+            old_model = (
+                EAMLModel(num_classes=len(previous)).to(DEVICE)
+                if model_name == "eaml"
+                else DocFormer(cfg, num_classes=len(previous)).to(cfg.device)
+            )
             prev_ckpt = os.path.join(checkpoint_dir, f"step_{step-1}_class_{previous[-1]}.pth")
             if os.path.exists(prev_ckpt):
                 prev = torch.load(prev_ckpt, map_location=DEVICE)
@@ -125,20 +132,24 @@ def run_incremental_learning(
 
         criterion = nn.CrossEntropyLoss()
 
+        # --- EVM Feature Extraction and Training ---
+        features_by_class = extract_features(model, train_loader, DEVICE)
+        evm.fit(features_by_class)
+
         for epoch in range(start_epoch, num_epochs):
             print(f"\n=== Epoch {epoch+1}/{num_epochs} ===")
             # --- Train ---
             train_metrics = train_one_epoch_cil(model, train_loader, optimizer, criterion, DEVICE, metrics)
             train_loss = train_metrics.get('loss', 0)
             train_acc = train_metrics.get('top1_acc', 0)
-            # --- Validation --- #
-            val_metrics = evaluate(model, val_loader, DEVICE, metrics,full_model_acc)
+            # --- Validate ---
+            val_metrics = evaluate(model, val_loader, DEVICE, metrics, full_model_acc, evm=evm, use_evm=True)
             val_acc = val_metrics.get('top1_acc', 0)
-            # --- Adaptive LR --- #
+            # --- Adaptive LR ---
             lr_adj = lr_sched.step(val_acc)
             if lr_adj:
                 print(f"Learning rate reduced to {lr_sched.get_lr():.3e}")
-            # --- G_IL --- #
+            # --- G_IL ---
             g_il = None
             if full_model_acc is not None:
                 g_il = (val_acc - full_model_acc) / (1 - full_model_acc)
@@ -156,11 +167,11 @@ def run_incremental_learning(
             exemplar_mgr.set_feature_extractor(model)
             exemplar_mgr.update(train_loader.dataset, class_order[step], model)
 
-    # Saving final model
+    # Save final model
     save_checkpoint(model, optimizer, num_epochs, os.path.join(checkpoint_dir, "final_model.pth"))
-    print("Incremental Learning completed successfully!")
+    print("Incremental Learning with EVM completed successfully!")
 
-    # --- TESTING ON BEST MODEL --- #
+    # --- TESTING ON BEST MODEL ---
     if best_model_path is not None and test_loader is not None:
         print("\n=== Testing Best Model on Test Set ===")
         # Rebuild model with all classes
@@ -177,7 +188,7 @@ def run_incremental_learning(
         model.eval()
         # Use a fresh metrics object for test
         test_metrics = CILMetrics(class_order)
-        test_results = evaluate(model, test_loader, DEVICE, test_metrics,full_model_acc)
+        test_results = evaluate(model, test_loader, DEVICE, test_metrics,full_model_acc, evm=evm, use_evm=True)
         test_acc = test_results.get('top1_acc', 0)
         g_il_test = None
         if full_model_acc is not None:
@@ -186,8 +197,6 @@ def run_incremental_learning(
         if g_il_test is not None:
             print(f"Test Incremental Learning Gap (G_IL): {g_il_test:.4f}")
         print("=== End of Test Evaluation ===")
-
-
 
 if __name__ == "__main__":
     import argparse
@@ -211,10 +220,13 @@ if __name__ == "__main__":
     p.add_argument('--exemplar_selection', choices=['random','herding'], default='herding')
     p.add_argument('--training_mode', choices=['full','last_layer','selective'], default='last_layer')
     p.add_argument('--trainable_layers', nargs='+', default=None)
-    p.add_argument('--resume_checkpoint', type=str, default=None)
+    p.add_argument('--resume_checkpoint', type=str, default=None, help="Path to checkpoint for resuming training")
+    p.add_argument('--evm_tailsize', type=float, default=0.5)
+    p.add_argument('--evm_threshold', type=float, default=0.7)
     p.add_argument('--full_model_acc', type=float, default=None)
+    p.add_argument('--weight_decay', type=float, default=1e-4)
     args = p.parse_args()
-    run_incremental_learning(
+    run_incremental_learning_evm(
         data_root=args.data_dir,
         class_order=args.class_order.split(','),
         base_model_path=args.base_model_path,
@@ -235,5 +247,8 @@ if __name__ == "__main__":
         training_mode=args.training_mode,
         trainable_layers=args.trainable_layers,
         resume_checkpoint=args.resume_checkpoint,
-        full_model_acc=args.full_model_acc
+        evm_tailsize=args.evm_tailsize,
+        evm_threshold=args.evm_threshold,
+        full_model_acc=args.full_model_acc,
+        weight_decay=args.weight_decay
     )

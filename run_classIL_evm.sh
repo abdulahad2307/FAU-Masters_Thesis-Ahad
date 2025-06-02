@@ -1,8 +1,8 @@
 #!/bin/bash -l
 
-#SBATCH --job-name=cil_test_run          # Job name
-#SBATCH --output=logs/cil_test_%j.out    # Standard output log
-#SBATCH --error=logs/cil_test_%j.err     # Error log
+#SBATCH --job-name=cil_evm_test_run          # Job name
+#SBATCH --output=logs/cil_test_evm_%j.out    # Standard output log
+#SBATCH --error=logs/cil_test_evm_%j.err     # Error log
 #SBATCH --partition=v100                 # GPU partition name
 #SBATCH --nodes=1                        # Number of nodes
 #SBATCH --ntasks=1                       # Number of tasks
@@ -24,15 +24,14 @@ export https_proxy=http://proxy:80
 # Move to the repository folder
 export PYTHONPATH=$PYTHONPATH:$(pwd)/FAU-Masters_Thesis-Ahad
 
-# Test with just 3 classes in incremental steps
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export CUDA_LAUNCH_BLOCKING=1
 
-echo "Starting Enhanced Class Incremental Learning..."
+echo "Starting Class Incremental Learning WITH EVM..."
 
-python src/class_incremental.py \
+python src/class_incremental_evm.py \
   --data_dir /home/woody/iwi5/iwi5280h/dataset/small_dataset \
-  --checkpoint_dir checkpoints/enhanced_cil \
+  --checkpoint_dir checkpoints/enhanced_cil_evm \
   --model_name "eaml" \
   --class_order "letter,form,email,handwritten,advertisement,scientific_report,invoice,presentation,questionnaire,resume,memo,scientific publication,specification,file folder,news article,budget" \
   --start_step 11 \
@@ -49,13 +48,14 @@ python src/class_incremental.py \
   --exemplar_selection "herding" \
   --training_mode "last_layer" \
   --base_model_path /home/hpc/iwi5/iwi5280h/projects/FAU-Masters_Thesis-Ahad/outputs/eaml_20250601_175404/eaml_best_model.pt\
+  --evm_tailsize 0.5 \
+  --evm_threshold 0.7\
   --full_model_acc 0.7775
 
-
-echo "Enhanced Class Incremental Learning Completed."
+echo "Class Incremental Learning WITH EVM Completed."
 
 # To run:
-# sbatch run_classIL.sh
+# sbatch run_classIL_evm.sh
 
 #--data_dir /home/woody/iwi5/iwi5280h/dataset/prepdata \
 
