@@ -192,7 +192,7 @@ def run_incremental_learning_evm(
         test_acc = test_results.get('top1_acc', 0)
         g_il_test = None
         if full_model_acc is not None:
-            g_il_test = ((test_acc*100) - full_model_acc) / (1 - full_model_acc)
+            g_il_test = (test_acc - full_model_acc) / (1 - full_model_acc)
         print(f"\nTest Accuracy: {test_acc:.4f}")
         if g_il_test is not None:
             print(f"Test Incremental Learning Gap (G_IL): {g_il_test:.4f}")
