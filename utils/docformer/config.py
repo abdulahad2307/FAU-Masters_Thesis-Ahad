@@ -15,32 +15,31 @@ class DocFormerConfig:
     max_position_embeddings: int = 512
     initializer_range: float = 0.02
     
+    # OCR configuration
+    ocr_engine: str = "tesseract"  # [tesseract, trocr, pero]
+    ocr_cache_dir: str = "ocr_cache"
+    ocr_batch_size: int = 16
+    ocr_device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    
     # Visual backbone
     visual_backbone: str = "resnet50"
     visual_feature_dim: int = 2048
     visual_output_dim: int = 768
     
-    # Training
-    learning_rate: float = 2.5e-5
-    weight_decay: float = 0.01
-    warmup_steps: int = 1000
-    batch_size: int = 8
-    num_train_epochs: int = 5
-    max_grad_norm: float = 1.0
-    checkpoint_keep_last: int = 3
+    # Training phases
+    phase: str = "pretrain"  # [pretrain, finetune]
     
-    # Pre-training tasks weights (λ=5, β=1, γ=5 from paper)
-    mm_mlm_weight: float = 5.0  # λ
-    ltr_weight: float = 1.0      # β
-    tdi_weight: float = 5.0      # γ
-    
-    # Pre-training tasks probabilities
+    # Pre-training
+    pretrain_tasks: list = ["mm_mlm", "ltr", "tdi"]
     mm_mlm_probability: float = 0.15
-    tdi_negative_probability: float = 0.2  # 20% negative pairs
+    tdi_negative_probability: float = 0.2
     
-    # Logging
-    logging_steps: int = 50
-    save_steps: int = 500
+    # Optimization
+    use_amp: bool = True
+    use_gradient_checkpointing: bool = True
+    batch_size: int = 8
+    num_workers: int = 4
+    max_grad_norm: float = 1.0
     
     # Device
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
