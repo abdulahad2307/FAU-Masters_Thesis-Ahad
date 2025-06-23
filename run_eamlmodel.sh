@@ -1,6 +1,6 @@
 #!/bin/bash -l
 
-#SBATCH --job-name=eamlsmall_training          # Job name
+#SBATCH --job-name=eaml_all_training_trocr          # Job name
 #SBATCH --output=logs/%x_%j.out           # Standard output log
 #SBATCH --error=logs/%x_%j.err            # Error log
 #SBATCH --partition=v100                  # GPU partition name
@@ -29,7 +29,8 @@ echo "Starting EAML Training..."
 CLASSES="letter form email handwritten advertisement scientific_report invoice presentation questionnaire resume memo"
 
 # Create output directory
-OUTPUT_DIR="outputs/eaml_$(date +%Y%m%d_%H%M%S)"
+OUTPUT_DIR="outputs/All_eaml_trocr_$(date +%Y%m%d_%H%M%S)"
+OCR_JSON_PATH="/home/woody/iwi5/iwi5280h/dataset/all_dataset_ocr_texts_trocr.json"
 mkdir -p $OUTPUT_DIR
 mkdir -p logs
 
@@ -42,27 +43,29 @@ else
 fi
 
 python src/sota_eaml_model.py \
-  --data_dir /home/woody/iwi5/iwi5280h/dataset/small_dataset \
+  --data_dir /home/woody/iwi5/iwi5280h/dataset/prepdata \
+  --ocr_json_path $OCR_JSON_PATH \
   --output_dir $OUTPUT_DIR \
-  --num_epochs 300 \
-  --batch_size 8 \
-  --learning_rate 1e-4 \
-  --weight_decay 0.005 \
+  --num_epochs 100 \
+  --batch_size 32 \
+  --learning_rate 1e-3 \
+  --weight_decay 0.05 \
   --classes $CLASSES \
   --device cuda \
-  --patience 30 \
+  --patience 15 \
   --keep_checkpoints 2 \
   --cls_weight 1.0 \
   --kld_weight 0.3 \
   --kld_threshold 0.1 \
   --embed_dim 512 \
   --dropout_rate 0.2 \
-  --ocr_engine trocr \
-  --ocr_model microsoft/trocr-base-handwritten \
   $RESUME_ARG
 
-echo "Training Completed. Output: $SLURM_OUTPUT"
+echo "Training Completed. Output: $OUTPUT_DIR"
 
 #sbatch run_eamlmodel.sh
 #--data_dir /home/woody/iwi5/iwi5280h/dataset/prepdata \
 #--data_dir /home/woody/iwi5/iwi5280h/dataset/small_dataset \
+
+# json_small_trocr -- "/home/woody/iwi5/iwi5280h/dataset/small_dataset_ocr_texts_trocr.json"
+# json_all_trocr -- "/home/woody/iwi5/iwi5280h/dataset/all_dataset_ocr_texts_trocr.json"
