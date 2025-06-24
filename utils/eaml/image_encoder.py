@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-import timm  # Pretrained models
+import timm
 
 class ImageEncoder(nn.Module):
     def __init__(self, model_name="inception_resnet_v2", embed_dim=512):
@@ -13,6 +13,9 @@ class ImageEncoder(nn.Module):
         """
         super(ImageEncoder, self).__init__()
         self.model = timm.create_model(model_name, pretrained=True, num_classes=embed_dim)
+
+        for param in self.model.parameters():
+            param.requires_grad = True #False ##  # True for trainable, False for frozen
 
     def forward(self, x):
         return self.model(x)

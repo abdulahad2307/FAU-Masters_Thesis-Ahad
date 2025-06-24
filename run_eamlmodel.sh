@@ -47,18 +47,18 @@ python src/sota_eaml_model.py \
   --ocr_json_path $OCR_JSON_PATH \
   --output_dir $OUTPUT_DIR \
   --num_epochs 100 \
-  --batch_size 32 \
-  --learning_rate 1e-3 \
+  --batch_size 16 \
+  --learning_rate 5e-5 \
   --weight_decay 0.05 \
   --classes $CLASSES \
   --device cuda \
-  --patience 15 \
+  --patience 30 \
   --keep_checkpoints 2 \
   --cls_weight 1.0 \
-  --kld_weight 0.3 \
+  --kld_weight 0.5 \
   --kld_threshold 0.1 \
   --embed_dim 512 \
-  --dropout_rate 0.2 \
+  --dropout_rate 0.5 \
   $RESUME_ARG
 
 echo "Training Completed. Output: $OUTPUT_DIR"

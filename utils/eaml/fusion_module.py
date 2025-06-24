@@ -13,33 +13,44 @@ class EnhancedFusionModule(nn.Module):
             dropout_rate (float): Dropout rate for regularization.
         """
         super(EnhancedFusionModule, self).__init__()
-        self.self_attn = nn.MultiheadAttention(embed_dim, num_heads)
-        self.dropout1 = nn.Dropout(dropout_rate)
-        self.norm1 = nn.LayerNorm(embed_dim)
+        # Image attention block
+        self.img_attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout_rate)
+        self.img_norm = nn.LayerNorm(embed_dim)
         
-        # Feed-forward network with residual connection
-        self.fc1 = nn.Linear(embed_dim, embed_dim * 2)
-        self.activation = nn.GELU()
-        self.fc2 = nn.Linear(embed_dim * 2, embed_dim)
-        self.dropout2 = nn.Dropout(dropout_rate)
-        self.norm2 = nn.LayerNorm(embed_dim)
+        # Text attention block
+        self.txt_attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout_rate)
+        self.txt_norm = nn.LayerNorm(embed_dim)
         
+        # Channel-wise gating
+        self.gate = nn.Sequential(
+            nn.Linear(embed_dim * 2, embed_dim),
+            nn.Sigmoid()
+        )
+        
+        # Feature combiner
+        self.combiner = nn.Sequential(
+            nn.Linear(embed_dim * 2, embed_dim),
+            nn.GELU()
+        )
+
     def forward(self, image_feat, text_feat):
-        # Stack features for cross-modal attention
-        fusion_input = torch.cat((image_feat.unsqueeze(0), text_feat.unsqueeze(0)), dim=0)
+        # Reshape for attention: [seq_len, batch, features]
+        I = image_feat.unsqueeze(0)  # [1, B, D]
+        T = text_feat.unsqueeze(0)   # [1, B, D]
         
-        # Self-attention with residual connection
-        attn_output, _ = self.self_attn(fusion_input, fusion_input, fusion_input)
-        attn_output = self.dropout1(attn_output)
-        fusion_output = self.norm1(fusion_input + attn_output)
+        # Cross-modal attention
+        img_attn_out, _ = self.img_attn(I, T, T)  # Image attends to text
+        txt_attn_out, _ = self.txt_attn(T, I, I)  # Text attends to image
         
-        # Mean pooling across modalities
-        pooled_output = fusion_output.mean(dim=0)
+        # Residual connections
+        img_out = self.img_norm(I + img_attn_out).squeeze(0)
+        txt_out = self.txt_norm(T + txt_attn_out).squeeze(0)
         
-        # Feed-forward network with residual connection
-        ff_output = self.fc1(pooled_output)
-        ff_output = self.activation(ff_output)
-        ff_output = self.fc2(ff_output)
-        ff_output = self.dropout2(ff_output)
+        # Channel-wise gating
+        gate_signal = self.gate(torch.cat([img_out, txt_out], dim=-1))
+        gated_img = img_out * gate_signal
+        gated_txt = txt_out * (1 - gate_signal)
         
-        return self.norm2(pooled_output + ff_output)
+        # Feature fusion
+        fused = self.combiner(torch.cat([gated_img, gated_txt], dim=-1))
+        return fused

@@ -18,7 +18,7 @@ class TextEncoder(nn.Module):
         
         # Freeze BERT layers
         for param in self.bert.parameters():
-            param.requires_grad = False
+            param.requires_grad = True #False  ##  # True for trainable, False for frozen
 
     def forward(self, text):
 

@@ -5,7 +5,7 @@ from .text_encoder import TextEncoder
 from .fusion_module import EnhancedFusionModule
 
 class EAMLModel(nn.Module):
-    def __init__(self, num_classes=16, embed_dim=512, dropout_rate=0.2):
+    def __init__(self, num_classes=16, embed_dim=512, dropout_rate=0.2, freeze_image_encoder=False):
         super().__init__()
         # Encoders
         self.image_encoder = ImageEncoder(embed_dim=embed_dim)
