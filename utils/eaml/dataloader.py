@@ -24,7 +24,8 @@ class EAML_Dataset(Dataset):
         self.samples = []
         self.ocr_json_path = ocr_json_path
         self.tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-        self.class_to_idx = {}
+        self.class_to_idx = {cls: idx for idx, cls in enumerate(self.class_list)}
+        print("Class to index mapping:", self.class_to_idx)
         self.idx_to_class = {}
         self.img_size = img_size  # Store img_size for fallback
         self._build_class_mappings()
@@ -52,6 +53,7 @@ class EAML_Dataset(Dataset):
             if label in self.class_to_idx:
                 valid_samples.append(sample)
             else:
+                print(f"Label mismatch: {label} not in class_to_idx")
                 invalid_samples += 1
         if invalid_samples > 0:
             print(f"Warning: Found {invalid_samples} samples with invalid labels")

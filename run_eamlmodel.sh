@@ -29,15 +29,18 @@ echo "Starting EAML Training..."
 CLASSES="letter form email handwritten advertisement scientific_report invoice presentation questionnaire resume memo"
 
 # Create output directory
-OUTPUT_DIR="outputs/All_eaml_trocr_$(date +%Y%m%d_%H%M%S)"
+OUTPUT_DIR="outputs/All_eaml_trocr_20250624_231314" #"outputs/All_eaml_trocr_$(date +%Y%m%d_%H%M%S)"
 OCR_JSON_PATH="/home/woody/iwi5/iwi5280h/dataset/all_dataset_ocr_texts_trocr.json"
 mkdir -p $OUTPUT_DIR
 mkdir -p logs
 
+# Path to checkpoint
+CHECKPOINT_PATH="/home/hpc/iwi5/iwi5280h/projects/FAU-Masters_Thesis-Ahad/outputs/All_eaml_trocr_20250624_231314/eaml_checkpoint_ep19.pt"
+
 # Check if resuming from a checkpoint
-if [ -n "$1" ] && [ -f "$1" ]; then
-    RESUME_ARG="--resume $1"
-    echo "Resuming training from checkpoint: $1"
+if [ -n "$19" ] && [ -f "$CHECKPOINT_PATH" ]; then
+    RESUME_ARG="--resume $CHECKPOINT_PATH"
+    echo "Resuming training from checkpoint: $CHECKPOINT_PATH"
 else
     RESUME_ARG=""
 fi
@@ -52,7 +55,7 @@ python src/sota_eaml_model.py \
   --weight_decay 0.05 \
   --classes $CLASSES \
   --device cuda \
-  --patience 30 \
+  --patience 13 \
   --keep_checkpoints 2 \
   --cls_weight 1.0 \
   --kld_weight 0.5 \

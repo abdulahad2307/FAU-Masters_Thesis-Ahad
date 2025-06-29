@@ -94,6 +94,14 @@ class EAMLTrainer:
             loss_dict = self.criterion(outputs, labels)
             loss = loss_dict['total_loss']
             loss.backward()
+
+            # gradient clipping
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            
+            #gradient norms for monitoring
+            grad_norms = [p.grad.norm().item() for p in self.model.parameters() if p.grad is not None]
+            #print(f"Grad norms: {grad_norms}")
+
             self.optimizer.step()
             total_loss += loss.item()
             cls_loss_sum += loss_dict['cls_loss'].item()
@@ -195,6 +203,8 @@ def main():
     parser.add_argument('--kld_threshold', type=float, default=0.1, help='Threshold for truncated KL divergence')
     parser.add_argument('--embed_dim', type=int, default=512, help='Embedding dimension')
     parser.add_argument('--dropout_rate', type=float, default=0.2, help='Dropout rate')
+    parser.add_argument('--freeze_image_encoder', type=bool, default=False, help='False allows weights to update, True for feature extraction only')
+
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -217,7 +227,8 @@ def main():
     model = EAMLModel(
         num_classes=len(class_list),
         embed_dim=args.embed_dim,
-        dropout_rate=args.dropout_rate
+        dropout_rate=args.dropout_rate,
+        freeze_image_encoder=args.freeze_image_encoder
     )
 
     start_epoch = 0
