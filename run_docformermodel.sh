@@ -1,8 +1,8 @@
 #!/bin/bash -l
 
-#SBATCH --job-name=alldocformer_small_training     # Job name
-#SBATCH --output=logs/alldocformer_%j.out    # Standard output log
-#SBATCH --error=logs/alldocformer_%j.err     # Error log
+#SBATCH --job-name=alldocformer_training     # Job name
+#SBATCH --output=logs/docformer_all_training_%j.out    # Standard output log
+#SBATCH --error=logs/docformer_all_training_%j.err     # Error log
 #SBATCH --partition=v100                  # GPU partition name
 #SBATCH --nodes=1                         # Number of nodes
 #SBATCH --ntasks=1                        # Number of tasks
@@ -14,7 +14,7 @@
 unset SLURM_EXPORT_ENV
 
 # Load required modules
-# Load required modules
+# Load modules
 module load cuda/12.6
 module load python/3.12-conda
 conda activate mtil
@@ -22,46 +22,74 @@ conda activate mtil
 export http_proxy=http://proxy:80
 export https_proxy=http://proxy:80
 
-echo "Starting DocFormer Training..."
+# Move to the repository folder
+export PYTHONPATH=$PYTHONPATH:$(pwd)/FAU-Masters_Thesis-Ahad
 
-# Define classes as comma-separated list matching paper implementation
+
+echo "Starting Progressive DocFormer Training..."
+
+# Configuration
+OCR_ENGINE=${1:-"trocr"} # tesseract, trocr, pero, easyocr, paddleocr
+DATA_DIR=${2:-"/home/woody/iwi5/iwi5280h/dataset/small_dataset"}
+OUTPUT_DIR="docformer_outputs_$(date +%Y%m%d_%H%M%S)"  
 CLASSES="advertisement,budget,email,file_folder,form,handwritten,invoice,letter,memo,news_article,presentation,questionnaire,resume,scientific_publication,scientific_report,specification"
 
-# Create time-stamped output directory
-OUTPUT_DIR="docformer_outputs/$(date +%Y%m%d_%H%M%S)"
 mkdir -p $OUTPUT_DIR
 mkdir -p logs
 
-# Training parameters (matches paper settings)
-PHASE="finetune"  # or "pretrain" for pre-training phase
-OCR_ENGINE="trocr"  # [tesseract|trocr|pero]
-BATCH_SIZE=8
-NUM_EPOCHS=50
-LEARNING_RATE=2.5e-5
-MAX_SEQ_LENGTH=512
-
-# Check for resuming training
-if [ -n "$1" ] && [ -f "$1" ]; then
-    RESUME_ARG="--resume $1"
-    echo "Resuming training from checkpoint: $1"
+if [ "$EVAL_ONLY" = "true" ]; then
+    echo "=== Running Evaluation Only ==="
+    
+    # Check if there's an existing model to evaluate
+    if [ ! -f "$OUTPUT_DIR/best_model.pt" ]; then
+        echo "Error: No trained model found at $OUTPUT_DIR/best_model.pt"
+        echo "Please train a model first or provide the correct output directory"
+        exit 1
+    fi
+    
+    python src/sota_docformer_model.py \
+        --data_dir "$DATA_DIR" \
+        --output_dir "$OUTPUT_DIR" \
+        --ocr_engine "$OCR_ENGINE" \
+        --classes "$CLASSES" \
+        --evaluate_only
+        
 else
-    RESUME_ARG=""
+    echo "=== Starting Training ==="
+    
+    # Training with progressive stages
+    python src/sota_docformer_model.py \
+        --data_dir "$DATA_DIR" \
+        --output_dir "$OUTPUT_DIR" \
+        --ocr_engine "$OCR_ENGINE" \
+        --classes "$CLASSES" \
+        --text_epochs 3 \
+        --visual_epochs 3 \
+        --final_epochs 5 \
+        --batch_size 4 \
+        --finetune_batch_size 2 \
+        --learning_rate 5e-5 \
+        --finetune_lr 2.5e-5 \
+        --num_workers 2 \
+        --progressive
+
+    echo "Training completed!"
+    
+    echo "=== Starting Final Evaluation ==="
+    
+    # Run evaluation after training
+    python src/sota_docformer_model.py \
+        --data_dir "$DATA_DIR" \
+        --output_dir "$OUTPUT_DIR" \
+        --ocr_engine "$OCR_ENGINE" \
+        --classes "$CLASSES" \
+        --evaluate_only
 fi
 
-# Start training with paper-compliant parameters
-python src/main.py \
-  --data_dir /home/woody/iwi5/iwi5280h/dataset/small_dataset \
-  --output_dir $OUTPUT_DIR \
-  --batch_size $BATCH_SIZE \
-  --num_epochs $NUM_EPOCHS \
-  --learning_rate $LEARNING_RATE \
-  --max_seq_length $MAX_SEQ_LENGTH \
-  --classes "$CLASSES" \
-  --ocr_engine $OCR_ENGINE \
-  --phase $PHASE \
-  $RESUME_ARG
-
-echo "Training Completed. Output: $OUTPUT_DIR"
+echo "=== Process Completed ==="
+echo "Results saved to: $OUTPUT_DIR"
+echo "Training and Evaluation Completed."
 
 # sbatch run_docformermodel.sh
 #--data_dir /home/woody/iwi5/iwi5280h/dataset/prepdata \
+#"/home/woody/iwi5/iwi5280h/dataset/small_dataset"
