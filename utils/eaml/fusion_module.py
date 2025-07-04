@@ -20,9 +20,13 @@ class EnhancedFusionModule(nn.Module):
         self.img_max_pool = nn.AdaptiveMaxPool2d(1)
         self.txt_max_pool = nn.AdaptiveMaxPool1d(1)
         # FC layers for Q, K, V
-        self.fc_q = nn.Linear(embed_dim, embed_dim)
-        self.fc_k = nn.Linear(embed_dim, embed_dim)
-        self.fc_v = nn.Linear(embed_dim, embed_dim)
+        #self.fc_q = nn.Linear(embed_dim, embed_dim)
+        #self.fc_k = nn.Linear(embed_dim, embed_dim)
+        #self.fc_v = nn.Linear(embed_dim, embed_dim)
+        self.fc_q = nn.Linear(embed_dim * 3, embed_dim)
+        self.fc_k = nn.Linear(embed_dim * 3, embed_dim)
+        self.fc_v = nn.Linear(embed_dim * 3, embed_dim)
+
         self.dropout = nn.Dropout(dropout_rate)
 
     def forward(self, image_feat, text_feat):

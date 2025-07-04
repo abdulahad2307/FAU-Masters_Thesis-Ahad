@@ -27,8 +27,8 @@ class EAMLModel(nn.Module):
         self.dropout = nn.Dropout(dropout_rate)
         
         # Initialize OCR model
-        self.ocr_processor = None
-        self.ocr_model = None
+        #self.ocr_processor = None
+        #self.ocr_model = None
 
     """
     def forward(self, images, texts, return_features=False):

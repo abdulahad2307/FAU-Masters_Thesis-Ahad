@@ -29,25 +29,24 @@ echo "Starting EAML Training..."
 CLASSES="letter form email handwritten advertisement scientific_report invoice presentation questionnaire resume memo"
 
 # Create output directory
-OUTPUT_DIR="outputs/All_eaml_trocr_20250624_231314" #"outputs/All_eaml_trocr_$(date +%Y%m%d_%H%M%S)"
-OCR_JSON_PATH="/home/woody/iwi5/iwi5280h/dataset/all_dataset_ocr_texts_trocr.json"
+OUTPUT_DIR="outputs/all_eaml_trocr_$(date +%Y%m%d_%H%M%S)"
+OCR_DATA_PATH="/home/woody/iwi5/iwi5280h/dataset/small_dataset_ocr_texts_trocr.pt"
 mkdir -p $OUTPUT_DIR
 mkdir -p logs
 
 # Path to checkpoint
-CHECKPOINT_PATH="/home/hpc/iwi5/iwi5280h/projects/FAU-Masters_Thesis-Ahad/outputs/All_eaml_trocr_20250624_231314/eaml_checkpoint_ep19.pt"
+CHECKPOINT_PATH=""  # Set path if resuming
 
-# Check if resuming from a checkpoint
-if [ -n "$19" ] && [ -f "$CHECKPOINT_PATH" ]; then
+# Resume from checkpoint
+RESUME_ARG=""
+if [ -n "$CHECKPOINT_PATH" ] && [ -f "$CHECKPOINT_PATH" ]; then
     RESUME_ARG="--resume $CHECKPOINT_PATH"
     echo "Resuming training from checkpoint: $CHECKPOINT_PATH"
-else
-    RESUME_ARG=""
 fi
 
 python src/sota_eaml_model.py \
   --data_dir /home/woody/iwi5/iwi5280h/dataset/prepdata \
-  --ocr_json_path $OCR_JSON_PATH \
+  --ocr_data_path $OCR_DATA_PATH \
   --output_dir $OUTPUT_DIR \
   --num_epochs 100 \
   --batch_size 16 \
@@ -55,7 +54,7 @@ python src/sota_eaml_model.py \
   --weight_decay 0.05 \
   --classes $CLASSES \
   --device cuda \
-  --patience 13 \
+  --patience 15 \
   --keep_checkpoints 2 \
   --cls_weight 1.0 \
   --kld_weight 0.5 \

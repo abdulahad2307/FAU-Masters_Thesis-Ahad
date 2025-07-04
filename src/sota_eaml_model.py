@@ -99,7 +99,7 @@ class EAMLTrainer:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             
             #gradient norms for monitoring
-            grad_norms = [p.grad.norm().item() for p in self.model.parameters() if p.grad is not None]
+            #grad_norms = [p.grad.norm().item() for p in self.model.parameters() if p.grad is not None]
             #print(f"Grad norms: {grad_norms}")
 
             self.optimizer.step()
@@ -186,7 +186,7 @@ class EAMLTrainer:
 def main():
     parser = argparse.ArgumentParser(description="EAML for Document Classification with Precomputed OCR")
     parser.add_argument('--data_dir', type=str, required=True, help='Path to dataset directory')
-    parser.add_argument('--ocr_json_path', type=str, required=True, help='Path to precomputed OCR JSON file')
+    parser.add_argument('--ocr_data_path', type=str, required=True, help='Path to precomputed OCR file (.json or .pt)')
     parser.add_argument('--output_dir', type=str, default='outputs', help='Output directory')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
     parser.add_argument('--num_epochs', type=int, default=50, help='Number of epochs')
@@ -219,7 +219,7 @@ def main():
         data_dir=args.data_dir,
         batch_size=args.batch_size,
         class_list=class_list,
-        ocr_json_path=args.ocr_json_path
+        ocr_data_path=args.ocr_data_path
     )
 
     train_loader = eaml_loader.get_loader('train')
