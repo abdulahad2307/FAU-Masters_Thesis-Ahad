@@ -1,6 +1,6 @@
 #!/bin/bash -l
 
-#SBATCH --job-name=ocr_extraction_all4         # Job name
+#SBATCH --job-name=ocr_extraction_all1         # Job name
 #SBATCH --output=logs/%x_%j.out           # Standard output log
 #SBATCH --error=logs/%x_%j.err            # Error log
 #SBATCH --partition=v100                  # GPU partition name
@@ -24,18 +24,21 @@ export PYTHONPATH=$PYTHONPATH:$(pwd)/FAU-Masters_Thesis-Ahad
 echo "Starting OCR Extraction"
 
 DATA_DIR="/home/woody/iwi5/iwi5280h/dataset/prepdata"
-OUTPUT_JSON="/home/woody/iwi5/iwi5280h/dataset/all_dataset_ocr_texts_pero4.json"
-OCR_ENGINE="pero"
+OUTPUT_TENSOR="/home/woody/iwi5/iwi5280h/dataset/all_dataset_ocr_texts_trocr1.pt"
+OUTPUT_JSON="/home/woody/iwi5/iwi5280h/dataset/all_dataset_ocr_texts_trocr1.json"
+OCR_ENGINE="trocr"
 MAX_SIZE=1024
 
 python utils/ocr_extraction.py \
   --data_dir $DATA_DIR \
-  --output_json $OUTPUT_JSON \
+  --output_pt $OUTPUT_TENSOR\
+  --ocr_engine $OCR_ENGINE\
+  --offset 0\
   --max_images 100000 \
-  --offset 300000
+  --log_every 10000
 
 
-echo "OCR Extraction Completed. Output: $OUTPUT_JSON"
+echo "OCR Extraction Completed. Output: $OUTPUT_TENSOR |&| $OUTPUT_JSON "
 
 #sbatch run_ocrextractor.sh
 #--data_dir /home/woody/iwi5/iwi5280h/dataset/prepdata \
