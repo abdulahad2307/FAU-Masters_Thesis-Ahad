@@ -15,13 +15,13 @@ class EAML_Dataset(Dataset):
         transform=None,
         class_list: Optional[List[str]] = None,
         ocr_data_path: Optional[str] = None,
-        img_size: int = 224,
+        img_size: int = 229,
         handle_empty_text: str = "exclude",
         fallback_text: str = "[EMPTY]"
     ):
         self.data_dir = data_dir
         self.transform = transform
-        self.class_list = sorted(class_list) if class_list else None
+        self.class_list = class_list if class_list else None
         self.img_size = img_size
         self.handle_empty_text = handle_empty_text
         self.fallback_text = fallback_text
@@ -149,6 +149,19 @@ class EAML_Dataset(Dataset):
 
     def __getitem__(self, idx):
         img_path, text_data, label = self.samples[idx]
+        # ---- Label Mapping Check ----
+        if isinstance(label, str):
+            assert label in self.class_list, f"Label string {label} not in class_list!"
+            label_idx = self.class_list.index(label)
+        elif isinstance(label, int):
+            assert 0 <= label < len(self.class_list), f"Label idx {label} out of [0, {len(self.class_list)})"
+            label_idx = label
+        else:
+            raise ValueError(f"Unknown label type: {type(label)}")
+
+        # printing for first sample
+        if idx == 0:
+            print(f"Sample 0 label (raw): {label}, mapped idx: {label_idx}")
         try:
             image = Image.open(img_path).convert("RGB")
             if self.transform:
@@ -193,7 +206,7 @@ class EAML_DataLoader:
         data_dir: str,
         batch_size: int = 32,
         num_workers: int = 1,
-        img_size: int = 224,
+        img_size: int = 229,
         class_list: Optional[List[str]] = None,
         ocr_data_path: Optional[str] = None,
         handle_empty_text: str = "exclude",
@@ -205,7 +218,7 @@ class EAML_DataLoader:
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.img_size = img_size
-        self.class_list = sorted(class_list)
+        self.class_list = class_list
         self.ocr_data_path = ocr_data_path
         self.handle_empty_text = handle_empty_text
         self.fallback_text = fallback_text

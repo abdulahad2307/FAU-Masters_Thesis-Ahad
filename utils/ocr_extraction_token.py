@@ -39,11 +39,14 @@ def ocr_extraction_tokenization(
     # Initialize OCR engine
     if ocr_engine == "trocr":
         from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+        print("OCR Engine:", ocr_engine)
+
         processor = TrOCRProcessor.from_pretrained(ocr_kwargs.get("model_name", "microsoft/trocr-base-handwritten"))
         model = VisionEncoderDecoderModel.from_pretrained(ocr_kwargs.get("model_name", "microsoft/trocr-base-handwritten")).to(device)
         model.eval()
     elif ocr_engine == "tesseract":
         import pytesseract
+        print("OCR Engine:", ocr_engine)
     elif ocr_engine == "easyocr":
         import easyocr
         reader = easyocr.Reader(ocr_kwargs.get("languages", ["en"]))

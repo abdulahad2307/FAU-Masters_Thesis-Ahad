@@ -7,7 +7,7 @@ from PIL import Image
 import numpy as np
 import torch
 
-def precompute_ocr(data_dir, output_json, ocr_engine="trocr", ocr_kwargs=None, 
+def precompute_ocr(data_dir, output_json, ocr_engine="tesseract", ocr_kwargs=None, 
                    max_size=640, offset=0, max_images=None):
     if ocr_kwargs is None:
         ocr_kwargs = {}
@@ -106,7 +106,7 @@ if __name__ == "__main__":
                         choices=['trocr', 'tesseract', 'easyocr', 'pero', 'paddleocr'])
     parser.add_argument('--ocr_model', type=str, default='microsoft/trocr-base-handwritten')
     parser.add_argument('--ocr_lang', nargs='+', default=['en'])
-    parser.add_argument('--max_size', type=int, default=640)
+    parser.add_argument('--max_size', type=int, default=1024)
     parser.add_argument('--offset', type=int, default=0, help='Starting image index')
     parser.add_argument('--max_images', type=int, default=None, help='Maximum images to process')
     parser.add_argument('--pero_config', type=str, default=None, help='Pero-OCR config path')

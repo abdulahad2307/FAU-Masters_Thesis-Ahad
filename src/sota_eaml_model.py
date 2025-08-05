@@ -11,6 +11,7 @@ from tqdm import tqdm
 import torch.optim.lr_scheduler as lr_scheduler
 import shutil
 import json
+import numpy as np
 
 class EarlyStoppingHandler:
     def __init__(self, patience=7, min_delta=0, verbose=True):
@@ -35,7 +36,7 @@ class EarlyStoppingHandler:
                 print("Early stopping triggered")
 
 class EAMLTrainer:
-    def __init__(self, model, device=None, learning_rate=1e-4, weight_decay=0.01,
+    def __init__(self, model,class_list, device=None, learning_rate=1e-4, weight_decay=0.01,
                  cls_weight=1.0, kld_weight=0.3, kld_threshold=0.1):
         if device is None:
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -49,18 +50,19 @@ class EAMLTrainer:
             kld_weight=kld_weight,
             threshold=kld_threshold
         )
-        #self.optimizer = optim.AdamW(
-        #    model.parameters(),
-        #    lr=learning_rate,
-        #    weight_decay=weight_decay
-        #)
-        self.optimizer = torch.optim.SGD(
+        self.class_list = class_list
+        self.optimizer = optim.AdamW(
             model.parameters(),
             lr=learning_rate,
-            momentum=0.9,
-            nesterov=True,
             weight_decay=weight_decay
         )
+        #self.optimizer = torch.optim.SGD(
+        #    model.parameters(),
+        #    lr=learning_rate,
+        #    momentum=0.9,
+        #    nesterov=True,
+        #    weight_decay=weight_decay
+        #)
         #self.scheduler = lr_scheduler.CosineAnnealingWarmRestarts(
         #    self.optimizer,
         #    T_0=10,
@@ -89,6 +91,14 @@ class EAMLTrainer:
                 'attention_mask': batch['texts']['attention_mask'].to(self.device)
             }
             labels = batch['labels'].to(self.device)
+            # ---- Label Integrity Checking ----
+            assert labels.min() >= 0 and labels.max() < len(self.class_list), \
+                f"Batch label out of bounds! Got min={labels.min()}, max={labels.max()}, num_classes={len(self.class_list)}"
+            # printing some samples for manual inspection (once!)
+            if epoch == 0 and progress.n == 0:
+                print("First batch labels:", labels.cpu().numpy())
+                print("First images batch, mean:", images.mean().item())
+                print("First tokenized[0] input_ids:", texts['input_ids'][0])
             self.optimizer.zero_grad()
             outputs = self.model(images, texts, return_features=True)
             loss_dict = self.criterion(outputs, labels)
@@ -115,9 +125,18 @@ class EAMLTrainer:
                 'kld_loss': kld_loss_sum/(progress.n+1),
                 'acc': 100*correct/total
             })
-            self.scheduler.step()
+            #self.scheduler.step()
+        self.scheduler.step()
         epoch_time = time.time() - start_time
         print(f"Epoch {epoch+1} completed in {epoch_time:.2f}s")
+
+        label_counts = np.zeros(len(self.class_list), dtype=int)
+        for batch in dataloader:
+            batch_labels = batch['labels'].cpu().numpy()
+            for l in batch_labels:
+                label_counts[l] += 1
+
+        print("Label distribution in loader:", dict(enumerate(label_counts)))
         return total_loss / len(dataloader), epoch_time
 
     def evaluate(self, dataloader):
@@ -192,7 +211,8 @@ def main():
     parser.add_argument('--num_epochs', type=int, default=50, help='Number of epochs')
     parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=0.01, help='Weight decay for L2 regularization')
-    parser.add_argument('--classes', nargs='+', default=[], help='Space-separated list of class names')
+    parser.add_argument('--class_mapping_path', type=str, required=True, help='Path to JSON file with full class mapping')
+    parser.add_argument('--classes', type=str, default=None, help='Comma-separated list of class names to subset')
     parser.add_argument('--eval_only', action='store_true', help='Run evaluation only')
     parser.add_argument('--resume', type=str, help='Path to model checkpoint')
     parser.add_argument('--device', type=str, choices=['cuda', 'cpu'], help="Force device selection")
@@ -208,12 +228,36 @@ def main():
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
-    class_list = args.classes
+    with open(args.class_mapping_path, 'r') as f:
+        full_class_mapping = json.load(f)
+
+    #class_list = args.classes
+
+
+    # mapping to int key => class string, sorted by index:
+    ordered_classes = [full_class_mapping[str(i)] for i in range(len(full_class_mapping))]
+
+    if args.classes:
+        requested_subset = args.classes.split(",")
+        for cls in requested_subset:
+            if cls not in ordered_classes:
+                raise ValueError(f"Subset class {cls} not in full class mapping")
+        # Maintain order according to full mapping
+        class_list = [cls for cls in ordered_classes if cls in requested_subset]
+    else:
+        class_list = ordered_classes
+    print("Using class list:", class_list)
+    
     if args.device == 'cuda' and not torch.cuda.is_available():
         raise RuntimeError("CUDA/GPU requested but not available. Check your GPU configuration.")
     device = args.device if args.device else 'cuda' if torch.cuda.is_available() else 'cpu'
     if class_list is None:
         raise ValueError("Class list not found. Please provide via --classes")
+    
+    print("Class to Index Mapping:")
+    for idx, cname in enumerate(class_list):
+        print(f"{idx}: {cname}")
+
 
     eaml_loader = EAML_DataLoader(
         data_dir=args.data_dir,
@@ -234,6 +278,7 @@ def main():
     start_epoch = 0
     trainer = EAMLTrainer(
         model=model,
+        class_list = class_list,
         device=device,
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,

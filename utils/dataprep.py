@@ -16,7 +16,7 @@ CSV_PATHS = {
     "test": "/home/woody/iwi5/iwi5280h/dataset/data/test.csv"
 }
 
-OUTPUT_DIR = "/home/woody/iwi5/iwi5280h/dataset/prepdata"
+OUTPUT_DIR = "/home/woody/iwi5/iwi5280h/dataset/all_prepdataset"
 
 ## Mapping class numbers to names
 CLASS_MAPPING = {
@@ -25,11 +25,11 @@ CLASS_MAPPING = {
     2: "email",
     3: "handwritten",
     4: "advertisement",
-    5: "scientific report",
-    6: "scientific publication",
+    5: "scientific_report",
+    6: "scientific_publication",
     7: "specification",
-    8: "file folder",
-    9: "news article",
+    8: "file_folder",
+    9: "news_article",
     10: "budget",
     11: "invoice",
     12: "presentation",

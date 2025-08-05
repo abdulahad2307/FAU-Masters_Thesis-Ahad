@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from .image_encoder import ImageEncoder
 from .text_encoder import TextEncoder
 from .fusion_module import EnhancedFusionModule
@@ -102,10 +103,21 @@ class EAMLModel(nn.Module):
         # Apply dropout for regularization
         image_feat = self.dropout(image_feat)
         text_feat = self.dropout(text_feat)
+
+        #Normalization
+        image_feat = F.normalize(image_feat, p=2, dim=-1)
+        text_feat = F.normalize(text_feat, p=2, dim=-1)
+        #print("Features Shape:, image_feat.shape, text_feat.shape)
+
+        # Stack along modality dimension for multi-head attention
+        fusion_input = torch.stack([image_feat, text_feat], dim=1)  
+        # shape: [batch_size, 2, embed_dim]
+        fusion_module = EnhancedFusionModule(embed_dim=512, num_heads=8)
         
         # Fuse features
         fused_feat = self.fusion_module(image_feat, text_feat)
-        
+        #print("Fusion output shape:", fused_feat.shape)
+
         # Get predictions from each branch
         image_logits = self.image_classifier(image_feat)
         text_logits = self.text_classifier(text_feat)

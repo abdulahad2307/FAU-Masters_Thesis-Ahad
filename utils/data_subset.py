@@ -63,6 +63,6 @@ def create_subset(data_dir,out_dir, subset_name="subset", subset_size_per_class=
                 
             print(f"Created links for {sample_size} images from {original_class_path} to {subset_class_path}")
 
-data_dir = "/home/woody/iwi5/iwi5280h/dataset/prepdata"
+data_dir = "/home/woody/iwi5/iwi5280h/dataset/all_prepdataset"
 out_dir = "/home/woody/iwi5/iwi5280h/dataset/"
-create_subset(data_dir, out_dir,  subset_name="small_dataset", subset_size_per_class=200)
+create_subset(data_dir, out_dir,  subset_name="small_dataset2", subset_size_per_class=200)

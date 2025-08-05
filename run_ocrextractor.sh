@@ -23,23 +23,21 @@ export PYTHONPATH=$PYTHONPATH:$(pwd)/FAU-Masters_Thesis-Ahad
 
 echo "Starting OCR Extraction"
 
-DATA_DIR="/home/woody/iwi5/iwi5280h/dataset/prepdata"
+DATA_DIR="/home/woody/iwi5/iwi5280h/dataset/all_prepdataset"
 OUTPUT_TENSOR="/home/woody/iwi5/iwi5280h/dataset/all_dataset_ocr_texts_trocr1.pt"
-OUTPUT_JSON="/home/woody/iwi5/iwi5280h/dataset/all_dataset_ocr_texts_trocr1.json"
-OCR_ENGINE="trocr"
+OUTPUT_JSON="/home/woody/iwi5/iwi5280h/dataset/all_dataset_ocr_texts_tesseract.json"
+OCR_ENGINE="tesseract"
 MAX_SIZE=1024
 
 python utils/ocr_extraction.py \
   --data_dir $DATA_DIR \
-  --output_pt $OUTPUT_TENSOR\
+  --output_json $OUTPUT_JSON\
   --ocr_engine $OCR_ENGINE\
   --offset 0\
   --max_images 100000 \
-  --log_every 10000
-
 
 echo "OCR Extraction Completed. Output: $OUTPUT_TENSOR |&| $OUTPUT_JSON "
 
 #sbatch run_ocrextractor.sh
-#--data_dir /home/woody/iwi5/iwi5280h/dataset/prepdata \
+#--data_dir /home/woody/iwi5/iwi5280h/dataset/all_prepdataset \
 #--data_dir /home/woody/iwi5/iwi5280h/dataset/small_dataset \

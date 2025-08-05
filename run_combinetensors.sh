@@ -1,13 +1,12 @@
 #!/bin/bash -l
 
-#SBATCH --job-name=Combine_Tensors        # Job name
+#SBATCH --job-name=combine_tensor_tesseract        # Job name
 #SBATCH --output=logs/%x_%j.out           # Standard output log
 #SBATCH --error=logs/%x_%j.err            # Error log
-#SBATCH --partition=v100                  # GPU partition name
+#SBATCH --partition=broadwell512                  # GPU partition name
 #SBATCH --nodes=1                         # Number of nodes
 #SBATCH --ntasks=1                        # Number of tasks
-#SBATCH --cpus-per-task=1                 # Number of CPU cores per task
-#SBATCH --gres=gpu:v100:1                 # Number of GPUs
+#SBATCH --cpus-per-task=16                 # Number of CPU cores per task
 #SBATCH --time=23:55:00                   # Time limit hrs:min:sec
 #SBATCH --export=NONE                     # Avoid inheriting unwanted environment variables
 
@@ -21,16 +20,14 @@ export http_proxy=http://proxy:80
 export https_proxy=http://proxy:80
 export PYTHONPATH=$PYTHONPATH:$(pwd)/FAU-Masters_Thesis-Ahad
 
-OUTPUT_TENSORS ="/home/woody/iwi5/iwi5280h/dataset/all_dataset_ocr_texts_trocr.pt"
 echo "Combining Tensor Files"
 
-python utils/combine_tensors.py \
-  --inputs /home/woody/iwi5/iwi5280h/dataset/all_dataset_ocr_texts_trocr1.pt /home/woody/iwi5/iwi5280h/dataset/all_dataset_ocr_texts_trocr2.pt  /home/woody/iwi5/iwi5280h/dataset/all_dataset_ocr_texts_trocr3.pt /home/woody/iwi5/iwi5280h/dataset/all_dataset_ocr_texts_trocr4.pt \
-  --output /home/woody/iwi5/iwi5280h/dataset/all_dataset_ocr_texts_trocr.pt\
-  --key input_ids
-
+python utils/combine_tensorTokens.py \
+  --inputs /home/woody/iwi5/iwi5280h/dataset/all_prepdataset_ocr_texts_tesseract1.pt /home/woody/iwi5/iwi5280h/dataset/all_prepdataset_ocr_texts_tesseract2.pt /home/woody/iwi5/iwi5280h/dataset/all_prepdataset_ocr_texts_tesseract3.pt /home/woody/iwi5/iwi5280h/dataset/all_prepdataset_ocr_texts_tesseract4.pt /home/woody/iwi5/iwi5280h/dataset/all_prepdataset_ocr_texts_tesseract5.pt /home/woody/iwi5/iwi5280h/dataset/all_prepdataset_ocr_texts_tesseract6.pt /home/woody/iwi5/iwi5280h/dataset/all_prepdataset_ocr_texts_tesseract7.pt /home/woody/iwi5/iwi5280h/dataset/all_prepdataset_ocr_texts_tesseract8.pt \
+  --output /home/woody/iwi5/iwi5280h/dataset/all_dataset_ocr_texts_tesseract.pt\
+  
 echo "Tensor combination Completed. Output: $OUTPUT_TENSORS"
 
-#sbatch run_combinetensors.sh
+#sbatch.tinyfat run_combinetensors.sh
 #--data_dir /home/woody/iwi5/iwi5280h/dataset/prepdata \
 #--data_dir /home/woody/iwi5/iwi5280h/dataset/small_dataset \

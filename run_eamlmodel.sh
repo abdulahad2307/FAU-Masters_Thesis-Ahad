@@ -1,6 +1,6 @@
 #!/bin/bash -l
 
-#SBATCH --job-name=eaml_all_training_trocr          # Job name
+#SBATCH --job-name=eaml_all_training_tesseract          # Job name
 #SBATCH --output=logs/%x_%j.out           # Standard output log
 #SBATCH --error=logs/%x_%j.err            # Error log
 #SBATCH --partition=v100                  # GPU partition name
@@ -8,7 +8,7 @@
 #SBATCH --ntasks=1                        # Number of tasks
 #SBATCH --cpus-per-task=1                 # Number of CPU cores per task
 #SBATCH --gres=gpu:v100:1                 # Number of GPUs
-#SBATCH --time=23:55:00                   # Time limit hrs:min:sec
+#SBATCH --time=23:59:00                   # Time limit hrs:min:sec
 #SBATCH --export=NONE                     # Avoid inheriting unwanted environment variables
 
 unset SLURM_EXPORT_ENV
@@ -25,12 +25,15 @@ export PYTHONPATH=$PYTHONPATH:$(pwd)/FAU-Masters_Thesis-Ahad
 
 echo "Starting EAML Training..."
 
-# Define classes as space-separated list like DocFormer
-CLASSES="letter form email handwritten advertisement scientific_report invoice presentation questionnaire resume memo"
+# Define classes
+CLASS_MAPPING_PATH="/home/hpc/iwi5/iwi5280h/projects/FAU-Masters_Thesis-Ahad/class_mapping.json"
+#CLASSES="letter form email handwritten advertisement scientific_report invoice presentation questionnaire resume memo"
+#CLASSES="advertisement,budget,email,file_folder,form,handwritten,invoice,letter,memo,news_article,presentation,questionnaire,resume,scientific_publication,scientific_report,specification"
+CLASSES="letter,form,email,handwritten,advertisement,scientific_report,invoice,presentation,questionnaire,resume,memo"
 
 # Create output directory
-OUTPUT_DIR="outputs/all_eaml_trocr_$(date +%Y%m%d_%H%M%S)"
-OCR_DATA_PATH="/home/woody/iwi5/iwi5280h/dataset/small_dataset_ocr_texts_trocr.pt"
+OUTPUT_DIR="outputs/all_eaml_SGD_tesseract_$(date +%Y%m%d_%H%M%S)"
+OCR_DATA_PATH="/home/woody/iwi5/iwi5280h/dataset/all_dataset_ocr_texts_tesseract.pt " #all_dataset_ocr_texts_trocr.pt
 mkdir -p $OUTPUT_DIR
 mkdir -p logs
 
@@ -45,13 +48,14 @@ if [ -n "$CHECKPOINT_PATH" ] && [ -f "$CHECKPOINT_PATH" ]; then
 fi
 
 python src/sota_eaml_model.py \
-  --data_dir /home/woody/iwi5/iwi5280h/dataset/prepdata \
+  --data_dir /home/woody/iwi5/iwi5280h/dataset/all_prepdataset \
   --ocr_data_path $OCR_DATA_PATH \
   --output_dir $OUTPUT_DIR \
-  --num_epochs 100 \
+  --num_epochs 50 \
   --batch_size 16 \
-  --learning_rate 5e-5 \
-  --weight_decay 0.05 \
+  --learning_rate 1e-3 \
+  --weight_decay 0.01 \
+  --class_mapping_path $CLASS_MAPPING_PATH \
   --classes $CLASSES \
   --device cuda \
   --patience 15 \
@@ -66,8 +70,10 @@ python src/sota_eaml_model.py \
 echo "Training Completed. Output: $OUTPUT_DIR"
 
 #sbatch run_eamlmodel.sh
-#--data_dir /home/woody/iwi5/iwi5280h/dataset/prepdata \
+#--data_dir /home/woody/iwi5/iwi5280h/dataset/all_prepdataset \
 #--data_dir /home/woody/iwi5/iwi5280h/dataset/small_dataset \
 
 # json_small_trocr -- "/home/woody/iwi5/iwi5280h/dataset/small_dataset_ocr_texts_trocr.json"
 # json_all_trocr -- "/home/woody/iwi5/iwi5280h/dataset/all_dataset_ocr_texts_trocr.json"
+
+# /home/woody/iwi5/iwi5280h/dataset/all_dataset_ocr_texts_tesseract.pt

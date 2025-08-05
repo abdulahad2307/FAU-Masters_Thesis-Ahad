@@ -1,13 +1,12 @@
 #!/bin/bash -l
 
-#SBATCH --job-name=ocr_extraction_small2         # Job name
+#SBATCH --job-name=ocr_extraction_all_tesseract8        # Job name
 #SBATCH --output=logs/%x_%j.out           # Standard output log
 #SBATCH --error=logs/%x_%j.err            # Error log
-#SBATCH --partition=rtx3080                  # GPU partition name
+#SBATCH --partition=broadwell512                  # GPU partition name
 #SBATCH --nodes=1                         # Number of nodes
 #SBATCH --ntasks=1                        # Number of tasks
-#SBATCH --cpus-per-task=1                 # Number of CPU cores per task
-#SBATCH --gres=gpu:rtx3080:1                 # Number of GPUs
+#SBATCH --cpus-per-task=16                 # Number of CPU cores per task
 #SBATCH --time=23:55:00                   # Time limit hrs:min:sec
 #SBATCH --export=NONE                     # Avoid inheriting unwanted environment variables
 
@@ -23,27 +22,25 @@ export PYTHONPATH=$PYTHONPATH:$(pwd)/FAU-Masters_Thesis-Ahad
 
 echo "Starting OCR Extraction"
 
-DATA_DIR="/home/woody/iwi5/iwi5280h/dataset/small_dataset2"
-OUTPUT_TENSOR="/home/woody/iwi5/iwi5280h/dataset/small_dataset2_ocr_texts_docling.pt"
+DATA_DIR="/home/woody/iwi5/iwi5280h/dataset/all_prepdataset"
+OUTPUT_TENSOR="/home/woody/iwi5/iwi5280h/dataset/all_prepdataset_ocr_texts_tesseract8.pt"
 #OUTPUT_JSON="/home/woody/iwi5/iwi5280h/dataset/all_dataset_ocr_texts_trocr1.json"
 #OCR_ENGINE="trocr"
-OCR_ENGINE="docling_ocr"
+OCR_ENGINE="tesseract"
 MAX_SIZE=1024
 
 #utils/ocr_extraction_token.py \
 
-python utils/ocr_extraction_docling.py \
+python utils/ocr_extraction_token.py \
   --data_dir $DATA_DIR \
   --output_pt $OUTPUT_TENSOR \
   --ocr_engine $OCR_ENGINE \
-  --offset 0 \
-  --max_images 3200 \
   --max_size 1024\
-  --batch_size 4
+  --offset 350000 \
+  --max_images 49999 \
 
+echo "OCR Extraction Completed. Output: $OUTPUT_TENSOR "
 
-echo "OCR Extraction Completed. Output: $OUTPUT_TENSOR |&| $OUTPUT_JSON "
-
-#sbatch run_ocrextractorWtoken.sh
-#--data_dir /home/woody/iwi5/iwi5280h/dataset/prepdata \
+#sbatch.tinyfat run_ocrextractorWtoken.sh
+#--data_dir /home/woody/iwi5/iwi5280h/dataset/all_prepdataset \
 #--data_dir /home/woody/iwi5/iwi5280h/dataset/small_dataset \
