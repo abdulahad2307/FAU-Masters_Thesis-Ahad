@@ -1,6 +1,6 @@
 #!/bin/bash -l
 
-#SBATCH --job-name=eaml_all_training_tesseract          # Job name
+#SBATCH --job-name=eaml_all_class_training_tesseract          # Job name
 #SBATCH --output=logs/%x_%j.out           # Standard output log
 #SBATCH --error=logs/%x_%j.err            # Error log
 #SBATCH --partition=v100                  # GPU partition name
@@ -27,18 +27,18 @@ echo "Starting EAML Training..."
 
 # Define classes
 CLASS_MAPPING_PATH="/home/hpc/iwi5/iwi5280h/projects/FAU-Masters_Thesis-Ahad/class_mapping.json"
-#CLASSES="letter form email handwritten advertisement scientific_report invoice presentation questionnaire resume memo"
-#CLASSES="advertisement,budget,email,file_folder,form,handwritten,invoice,letter,memo,news_article,presentation,questionnaire,resume,scientific_publication,scientific_report,specification"
+ALL_CLASSES="letter,form,email,handwritten,advertisement,scientific_report,scientific_publication,specification,file_folder,news_article,budget,invoice,presentation,questionnaire,resume,memo"
+
 CLASSES="letter,form,email,handwritten,advertisement,scientific_report,invoice,presentation,questionnaire,resume,memo"
 
 # Create output directory
-OUTPUT_DIR="outputs/all_eaml_SGD_tesseract_$(date +%Y%m%d_%H%M%S)"
+OUTPUT_DIR="outputs/all_class_eaml_SGD_tesseract_20250807_215555"     #"outputs/all_class_eaml_SGD_tesseract_$(date +%Y%m%d_%H%M%S)"  
 OCR_DATA_PATH="/home/woody/iwi5/iwi5280h/dataset/all_dataset_ocr_texts_tesseract.pt " #all_dataset_ocr_texts_trocr.pt
 mkdir -p $OUTPUT_DIR
 mkdir -p logs
 
 # Path to checkpoint
-CHECKPOINT_PATH=""  # Set path if resuming
+CHECKPOINT_PATH="/home/hpc/iwi5/iwi5280h/projects/FAU-Masters_Thesis-Ahad/outputs/all_class_eaml_SGD_tesseract_20250807_215555/eaml_checkpoint_ep9.pt"  # Set path if resuming
 
 # Resume from checkpoint
 RESUME_ARG=""
@@ -56,9 +56,9 @@ python src/sota_eaml_model.py \
   --learning_rate 1e-3 \
   --weight_decay 0.01 \
   --class_mapping_path $CLASS_MAPPING_PATH \
-  --classes $CLASSES \
+  --classes $ALL_CLASSES \
   --device cuda \
-  --patience 15 \
+  --patience 1 \
   --keep_checkpoints 2 \
   --cls_weight 1.0 \
   --kld_weight 0.5 \

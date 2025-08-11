@@ -136,3 +136,29 @@ class EAMLModel(nn.Module):
         # During inference, return only fusion logits
         return fusion_logits
 
+    def extract_features(self, images, texts, input_ids=None, attention_mask=None):
+        """
+        Extract fused features - used during exemplar herding.
+        Args same as forward.
+        Returns:
+            fused features tensor
+        """
+        if images is None:
+            raise ValueError("Images input cannot be None")
+
+        if texts is None and input_ids is not None:
+            text_inputs = {
+                'input_ids': input_ids,
+                'attention_mask': attention_mask if attention_mask is not None else torch.ones_like(input_ids)
+            }
+        elif texts is not None:
+            text_inputs = texts
+        else:
+            raise ValueError("Either 'texts' or 'input_ids' must be provided")
+
+        image_feat = self.image_encoder(images)
+        text_feat = self.text_encoder(text_inputs)
+        image_feat = F.normalize(image_feat, p=2, dim=-1)
+        text_feat = F.normalize(text_feat, p=2, dim=-1)
+        fused_feat = self.fusion_module(image_feat, text_feat)
+        return fused_feat

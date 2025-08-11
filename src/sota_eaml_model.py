@@ -268,6 +268,7 @@ def main():
 
     train_loader = eaml_loader.get_loader('train')
     val_loader = eaml_loader.get_loader('val', shuffle=False)
+    
     model = EAMLModel(
         num_classes=len(class_list),
         embed_dim=args.embed_dim,
@@ -320,8 +321,21 @@ def main():
         with open(os.path.join(args.output_dir, 'classes.json'), 'w') as f:
             json.dump(class_list, f)
     else:
+        if args.resume and os.path.isfile(args.resume):
+            print(f"Loading checkpoint '{args.resume}' for evaluation...")
+            checkpoint = torch.load(args.resume, map_location=device)
+            model.load_state_dict(checkpoint['model_state_dict'])
+        else:
+            raise ValueError("No checkpoint found for evaluation (--resume required).")
+        
+        print("Evaluating on validation set...")
         val_loss, val_acc = trainer.evaluate(val_loader)
-        print(f"Evaluation - Loss: {val_loss:.4f}, Accuracy: {val_acc:.2f}%")
+        print(f"Validation - Loss: {val_loss:.4f}, Accuracy: {val_acc:.2f}%")
+        
+        test_loader = eaml_loader.get_loader('test', shuffle=False)
+        print("Evaluating on test set...")
+        test_loss, test_acc = trainer.evaluate(test_loader)
+        print(f"Test - Loss: {test_loss:.4f}, Accuracy: {test_acc:.2f}%")
 
 if __name__ == "__main__":
     if torch.cuda.is_available():
