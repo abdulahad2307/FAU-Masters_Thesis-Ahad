@@ -1,6 +1,6 @@
 #!/bin/bash -l
 
-#SBATCH --job-name=cil_evm_test_run          # Job name
+#SBATCH --job-name=eaml_cil_evm          # Job name
 #SBATCH --output=logs/cil_test_evm_%j.out    # Standard output log
 #SBATCH --error=logs/cil_test_evm_%j.err     # Error log
 #SBATCH --partition=v100                 # GPU partition name
@@ -26,18 +26,27 @@ export PYTHONPATH=$PYTHONPATH:$(pwd)/FAU-Masters_Thesis-Ahad
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export CUDA_LAUNCH_BLOCKING=1
+OCR_TENSOR_PATH="/home/woody/iwi5/iwi5280h/dataset/all_dataset_ocr_texts_tesseract.pt"
+BASE_MODEL="/home/hpc/iwi5/iwi5280h/projects/FAU-Masters_Thesis-Ahad/outputs/all_eaml_SGD_tesseract_20250805_223607/eaml_best_model.pt"
+CKPT_DIR="outputs/eaml_CIL/_cil_$(date +%Y%m%d_%H%M%S)"
+
+ALL_CLASSES="letter,form,email,handwritten,advertisement,scientific_report,scientific_publication,specification,file_folder,news_article,budget,invoice,presentation,questionnaire,resume,memo"
+# Subset trained on
+CLASSES="letter,form,email,handwritten,advertisement,scientific_report,invoice,presentation,questionnaire,resume,memo"
+mkdir -p $CKPT_DIR
 
 echo "Starting Class Incremental Learning WITH EVM..."
 
 python src/class_incremental_evm.py \
-  --data_dir /home/woody/iwi5/iwi5280h/dataset/small_dataset \
-  --checkpoint_dir checkpoints/enhanced_cil_evm \
+  --data_dir /home/woody/iwi5/iwi5280h/dataset/all_prepdataset \
+  --ocr_tensor_path $OCR_TENSOR_PATH\
+  --checkpoint_dir $CKPT_DIR \
   --model_name "eaml" \
-  --class_order "letter,form,email,handwritten,advertisement,scientific_report,invoice,presentation,questionnaire,resume,memo,scientific publication,specification,file folder,news article,budget" \
+  --class_order $ALL_CLASSES \
   --start_step 11 \
-  --batch_size 4 \
-  --lr 1e-4 \
-  --num_epochs 300 \
+  --batch_size 16 \
+  --lr 1e-3 \
+  --num_epochs 50 \
   --strategy "distillation" \
   --temperature 2.0 \
   --lambda_distill 1.0 \
@@ -47,10 +56,10 @@ python src/class_incremental_evm.py \
   --max_exemplars 200 \
   --exemplar_selection "herding" \
   --training_mode "last_layer" \
-  --base_model_path /home/hpc/iwi5/iwi5280h/projects/FAU-Masters_Thesis-Ahad/outputs/eaml_20250601_175404/eaml_best_model.pt\
+  --base_model_path $BASE_MODEL\
   --evm_tailsize 0.5 \
   --evm_threshold 0.7\
-  --full_model_acc 0.7775
+  --full_model_acc 0.953
 
 echo "Class Incremental Learning WITH EVM Completed."
 

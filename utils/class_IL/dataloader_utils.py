@@ -1,64 +1,105 @@
 import os
-from typing import List
+import json
+from typing import List, Dict, Optional
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from PIL import Image
 import torch
-from transformers import BertTokenizer, TrOCRProcessor, VisionEncoderDecoderModel
+from transformers import BertTokenizer
 
-# Common transform
 common_transform = transforms.Compose([
-    transforms.Resize((224, 224)),
+    transforms.Resize((229, 229)),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406],
                          std=[0.229, 0.224, 0.225])
 ])
 
+def _normalize_class_name(name):
+    # Remove leading/trailing whitespace and quotes
+    return name.strip().strip("'").strip('"')
 
 # ========================== EAML Dataset for Class IL ==========================
 class EAMLClassILDataset(Dataset):
-    def __init__(self, data_dir: str, current_classes: List[str], transform=None):
+    def __init__(self, data_dir, current_classes, ocr_data_path=None, transform=None, img_size=229, handle_empty_text="exclude", fallback_text="[EMPTY]"):
         self.data_dir = data_dir
-        self.current_classes = current_classes
+        self.current_classes = [cls.strip().strip('"').strip("'") for cls in current_classes]
         self.transform = transform
-
-        self.samples = []
-        self.tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-        self._ocr_processor = TrOCRProcessor.from_pretrained("microsoft/trocr-base-handwritten")
-        self._ocr_model = VisionEncoderDecoderModel.from_pretrained("microsoft/trocr-base-handwritten")
-        self._ocr_model.eval()
-        for p in self._ocr_model.parameters():
-            p.requires_grad = False
+        self.img_size = img_size
+        self.handle_empty_text = handle_empty_text
+        self.fallback_text = fallback_text
 
         self.class_to_idx = {cls: idx for idx, cls in enumerate(self.current_classes)}
+
+        self.tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+        self.ocr_tokenized = False
+        self.ocr_data = self._load_ocr_data(ocr_data_path)
+        self.samples = []
         self._load_samples()
 
-    def _extract_text(self, image: Image.Image) -> str:
-        with torch.no_grad():
-            pixel_values = self._ocr_processor(image, return_tensors="pt").pixel_values
-            generated_ids = self._ocr_model.generate(pixel_values)
-            return self._ocr_processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+    def _load_ocr_data(self, ocr_path):
+        if ocr_path is None:
+            return {}
+        if not os.path.exists(ocr_path):
+            raise FileNotFoundError(f"OCR data file not found: {ocr_path}")
+        if ocr_path.endswith('.pt') or ocr_path.endswith('.pth'):
+            loaded = torch.load(ocr_path, map_location='cpu')
+            first_val = next(iter(loaded.values()))
+            if isinstance(first_val, dict) and 'input_ids' in first_val and 'attention_mask' in first_val:
+                self.ocr_tokenized = True
+                return loaded
+            else:
+                raise ValueError("Tensor OCR file must be dict[img_path]->{'input_ids','attention_mask'}")
+        elif ocr_path.endswith('.json'):
+            import json
+            with open(ocr_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        else:
+            raise ValueError(f"Unsupported OCR data format: {ocr_path}")
+
+    def _get_ocr_entry(self, img_path):
+        if img_path in self.ocr_data:
+            return self.ocr_data[img_path]
+        filename = os.path.basename(img_path)
+        if filename in self.ocr_data:
+            return self.ocr_data[filename]
+        for k in self.ocr_data.keys():
+            if img_path.endswith(k) or k.endswith(filename):
+                return self.ocr_data[k]
+        return None
 
     def _load_samples(self):
-        for class_name in os.listdir(self.data_dir):
-            if class_name not in self.current_classes:
-                continue
+        for class_name in self.current_classes:
             class_dir = os.path.join(self.data_dir, class_name)
+            if not os.path.isdir(class_dir):
+                print(f"Warning: Directory for class '{class_name}' not found at {class_dir}")
+                continue
             for fname in os.listdir(class_dir):
                 if fname.lower().endswith((".png", ".jpg", ".jpeg", ".tif")):
                     img_path = os.path.join(class_dir, fname)
-                    try:
-                        image = Image.open(img_path).convert("RGB")
-                        text = self._extract_text(image)
-                        tokens = self.tokenizer(
-                            text, padding="max_length", truncation=True,
-                            max_length=128, return_tensors="pt"
-                        )
-                        self.samples.append((img_path, tokens, class_name))
-                    except Exception as e:
-                        print(f"Skipping {img_path} due to: {e}")
+                    ocr_entry = self._get_ocr_entry(img_path)
+                    if ocr_entry is None:
+                        print(f"Warning: No OCR data found for {img_path}")
+                        continue
+                    if self.ocr_tokenized:
+                        tokens = {
+                            "input_ids": torch.tensor(ocr_entry["input_ids"]),
+                            "attention_mask": torch.tensor(ocr_entry["attention_mask"])
+                        }
+                    else:
+                        text = ocr_entry
+                        if not text or (isinstance(text, str) and len(text.strip()) == 0):
+                            if self.handle_empty_text == "exclude":
+                                continue
+                            elif self.handle_empty_text == "fallback":
+                                text = self.fallback_text
+                        tokens_raw = self.tokenizer(text, padding="max_length", truncation=True, max_length=128, return_tensors="pt")
+                        tokens = {
+                            "input_ids": tokens_raw["input_ids"].squeeze(0),
+                            "attention_mask": tokens_raw["attention_mask"].squeeze(0)
+                        }
+                    self.samples.append((img_path, tokens, class_name))
 
-    def __len__(self): 
+    def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
@@ -69,12 +110,11 @@ class EAMLClassILDataset(Dataset):
         return {
             "image": image,
             "text": {
-                "input_ids": tokens["input_ids"].squeeze(0),
-                "attention_mask": tokens["attention_mask"].squeeze(0)
+                "input_ids": tokens["input_ids"],
+                "attention_mask": tokens["attention_mask"]
             },
             "label": torch.tensor(self.class_to_idx[label])
         }
-
 
 def eaml_collate_fn(batch):
     return {
@@ -86,31 +126,37 @@ def eaml_collate_fn(batch):
         "labels": torch.stack([x["label"] for x in batch])
     }
 
-
 # ========================== DocFormer Dataset for Class IL ==========================
 class DocFormerClassILDataset(Dataset):
     def __init__(self, data_dir: str, current_classes: List[str], tokenizer_name="bert-base-uncased", max_seq_length=512):
         self.data_dir = data_dir
-        self.current_classes = current_classes
-        self.class_to_idx = {cls: idx for idx, cls in enumerate(current_classes)}
+        self.current_classes = [_normalize_class_name(cls) for cls in current_classes]
+        self.class_to_idx = {cls: idx for idx, cls in enumerate(self.current_classes)}
         self.tokenizer = BertTokenizer.from_pretrained(tokenizer_name)
         self.max_seq_length = max_seq_length
         self.samples = []
-
-        self.class_to_idx = {cls: idx for idx, cls in enumerate(self.current_classes)}
         self._load_samples()
 
     def _load_samples(self):
         for class_name in os.listdir(self.data_dir):
-            if class_name not in self.current_classes:
+            norm_class = _normalize_class_name(class_name)
+            if norm_class not in self.current_classes:
                 continue
             class_dir = os.path.join(self.data_dir, class_name)
+            if not os.path.isdir(class_dir):
+                continue
+            found = False
             for file in os.listdir(class_dir):
                 if file.lower().endswith(('.png', '.jpg', '.jpeg', '.tif')):
                     self.samples.append({
                         'image_path': os.path.join(class_dir, file),
-                        'class_name': class_name
+                        'class_name': norm_class
                     })
+                    found = True
+            if not found:
+                print(f"Warning: No valid images found for class '{norm_class}' in {class_dir}")
+        if len(self.samples) == 0:
+            print("Warning: No samples loaded in DocFormerClassILDataset.")
 
     def __len__(self): 
         return len(self.samples)
@@ -132,7 +178,6 @@ class DocFormerClassILDataset(Dataset):
             "label": torch.tensor(self.class_to_idx[sample["class_name"]])
         }
 
-
 def docformer_collate_fn(batch):
     return {
         "pixel_values": torch.stack([x["pixel_values"] for x in batch]),
@@ -142,44 +187,49 @@ def docformer_collate_fn(batch):
         "labels": torch.stack([x["label"] for x in batch])
     }
 
-
 # ========================== Wrapper Loader ==========================
 def get_class_il_loader(
     model_type: str,
     data_dir: str,
     current_classes: List[str],
     batch_size: int = 32,
-    num_workers: int = 4) -> DataLoader:
+    num_workers: int = 4,
+    ocr_data: Optional[Dict] = None  # Add OCR data parameter
+) -> DataLoader:
     """Get dataloader for class incremental learning
-    
     Args:
         model_type: Either 'eaml' or 'docformer'
         data_dir: Root directory containing class folders
         current_classes: List of classes to include
         batch_size: Number of samples per batch
         num_workers: Number of workers for data loading
-        split: Data split ('train', 'val', 'test')
-        
     Returns:
         Configured DataLoader for the specified model type
     """    
     if model_type == "eaml":
-        dataset = EAMLClassILDataset(
-            data_dir=data_dir,
-            current_classes=current_classes,
-            transform=common_transform
-        )
-        return DataLoader(
-            dataset,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            collate_fn=eaml_collate_fn
-        )
+        if model_type == "eaml":
+            if ocr_data is None:
+                raise ValueError("OCR data must be provided for EAML model")
+            dataset = EAMLClassILDataset(
+                data_dir=data_dir,
+                current_classes=current_classes,
+                ocr_data_path=ocr_data,
+                transform=common_transform
+            )
+            return DataLoader(
+                dataset,
+                batch_size=batch_size,
+                num_workers=num_workers,
+                collate_fn=eaml_collate_fn,
+                pin_memory=True
+            )
     elif model_type == "docformer":
         dataset = DocFormerClassILDataset(
             data_dir=data_dir,
             current_classes=current_classes
         )
+        if len(dataset) == 0:
+            print("Warning: DocFormerClassILDataset is empty!")
         return DataLoader(
             dataset,
             batch_size=batch_size,

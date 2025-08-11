@@ -20,13 +20,14 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def run_incremental_learning(
     data_root: str,
+    ocr_tensor_path: str,
     class_order: List[str],
     base_model_path: str,
     model_name: str,
     checkpoint_dir: str,
     start_step: int = 0,
     batch_size: int = 8,
-    lr: float = 2e-5,
+    lr: float = 1e-3,
     num_epochs: int = 10,
     strategy: str = "distillation",
     temperature: float = 2.0,
@@ -40,7 +41,7 @@ def run_incremental_learning(
     trainable_layers: Optional[List[str]] = None,
     resume_checkpoint: Optional[str] = None,
     full_model_acc: Optional[float] = None,
-    weight_decay: float = 1e-4
+    weight_decay: float = 0.01
 ):
     os.makedirs(checkpoint_dir, exist_ok=True)
     #print("Starting Class Incremental Learning...")
@@ -72,9 +73,10 @@ def run_incremental_learning(
         if step > start_step:
             metrics.incremental_state_update(new_cls)
 
-        train_loader = get_class_il_loader(model_name, os.path.join(data_root, "train"), current, batch_size)
-        val_loader = get_class_il_loader(model_name, os.path.join(data_root, "val"), current, batch_size)
-        test_loader = get_class_il_loader(model_name, os.path.join(data_root, "test"), current, batch_size)
+        train_loader = get_class_il_loader(model_name, os.path.join(data_root, "train"), current, batch_size,ocr_data=ocr_tensor_path)
+        print(f"lenght of data: {len(train_loader)}")
+        val_loader = get_class_il_loader(model_name, os.path.join(data_root, "val"), current, batch_size,ocr_data=ocr_tensor_path)
+        test_loader = get_class_il_loader(model_name, os.path.join(data_root, "test"), current, batch_size, ocr_data=ocr_tensor_path)
 
         # Build model
         if model_name == "docformer":
@@ -96,7 +98,7 @@ def run_incremental_learning(
             model.load_state_dict(own)
             print(f"Loaded base model from {base_model_path}")
 
-        # Prepare old_model & EWC after first step
+        # Preparing old_model & EWC after first step
         if step > start_step:
             old_model = EAMLModel(num_classes=len(previous)).to(DEVICE) \
                 if model_name == "eaml" else DocFormer(cfg, num_classes=len(previous)).to(cfg.device)
@@ -193,6 +195,7 @@ if __name__ == "__main__":
     import argparse
     p = argparse.ArgumentParser()
     p.add_argument('--data_dir', required=True)
+    p.add_argument('--ocr_tensor_path', type=str, required=True, help="Path to OCR token tensor file (.pt/.pth) with pre-extracted OCR text")
     p.add_argument('--class_order', required=True, help="Comma-separated class order")
     p.add_argument('--base_model_path', required=True)
     p.add_argument('--model_name', required=True, choices=['eaml', 'docformer'])
@@ -216,6 +219,7 @@ if __name__ == "__main__":
     args = p.parse_args()
     run_incremental_learning(
         data_root=args.data_dir,
+        ocr_tensor_path=args.ocr_tensor_path,
         class_order=args.class_order.split(','),
         base_model_path=args.base_model_path,
         model_name=args.model_name,
