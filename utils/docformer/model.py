@@ -107,21 +107,21 @@ class MultiModalSelfAttention(nn.Module):
         self.num_attention_heads = config.num_attention_heads
         self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
         self.all_head_size = self.num_attention_heads * self.attention_head_size
-        
+
         # Text attention
         self.text_query = nn.Linear(config.hidden_size, self.all_head_size)
         self.text_key = nn.Linear(config.hidden_size, self.all_head_size)
         self.text_value = nn.Linear(config.hidden_size, self.all_head_size)
-        
+
         # Visual attention
         self.visual_query = nn.Linear(config.hidden_size, self.all_head_size)
         self.visual_key = nn.Linear(config.hidden_size, self.all_head_size)
         self.visual_value = nn.Linear(config.hidden_size, self.all_head_size)
-        
+
         # Shared spatial attention
         self.spatial_query = nn.Linear(config.hidden_size, self.all_head_size)
         self.spatial_key = nn.Linear(config.hidden_size, self.all_head_size)
-        
+
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
         self.layer_norm = nn.LayerNorm(config.hidden_size)
 
@@ -134,62 +134,62 @@ class MultiModalSelfAttention(nn.Module):
         batch_size = text_features.size(0)
         text_len = text_features.size(1)
         visual_len = visual_features.size(1)
-        
+
         # Text attention
         text_q = self.transpose_for_scores(self.text_query(text_features))
         text_k = self.transpose_for_scores(self.text_key(text_features))
         text_v = self.transpose_for_scores(self.text_value(text_features))
-        
+
         # Visual attention
         visual_q = self.transpose_for_scores(self.visual_query(visual_features))
         visual_k = self.transpose_for_scores(self.visual_key(visual_features))
         visual_v = self.transpose_for_scores(self.visual_value(visual_features))
-        
+
         # Spatial attention (shared)
         spatial_q = self.transpose_for_scores(self.spatial_query(spatial_features))
         spatial_k = self.transpose_for_scores(self.spatial_key(spatial_features))
-        
+
         # Compute attention scores
         text_scores = torch.matmul(text_q, text_k.transpose(-1, -2))
         visual_scores = torch.matmul(visual_q, visual_k.transpose(-1, -2))
-        
+
         # Add spatial attention
         text_spatial_scores = torch.matmul(spatial_q[:, :, :text_len], spatial_k[:, :, :text_len].transpose(-1, -2))
         visual_spatial_scores = torch.matmul(spatial_q[:, :, text_len:], spatial_k[:, :, text_len:].transpose(-1, -2))
-        
+
         # Combine scores
         text_scores = (text_scores + text_spatial_scores) / math.sqrt(self.attention_head_size)
         visual_scores = (visual_scores + visual_spatial_scores) / math.sqrt(self.attention_head_size)
-        
+
         # Apply attention masks
         if attention_mask is not None:
             text_mask = attention_mask[:, :text_len].unsqueeze(1).unsqueeze(2)
             visual_mask = attention_mask[:, text_len:].unsqueeze(1).unsqueeze(2)
-            
+
             text_scores = text_scores + (1.0 - text_mask) * -10000.0
             visual_scores = visual_scores + (1.0 - visual_mask) * -10000.0
-        
+
         # Softmax and apply to values
         text_probs = torch.softmax(text_scores, dim=-1)
         visual_probs = torch.softmax(visual_scores, dim=-1)
-        
+
         text_probs = self.dropout(text_probs)
         visual_probs = self.dropout(visual_probs)
-        
+
         text_context = torch.matmul(text_probs, text_v)
         visual_context = torch.matmul(visual_probs, visual_v)
-        
+
         # Reshape and combine
         text_context = text_context.permute(0, 2, 1, 3).contiguous()
         visual_context = visual_context.permute(0, 2, 1, 3).contiguous()
-        
+
         text_context = text_context.view(batch_size, text_len, self.all_head_size)
         visual_context = visual_context.view(batch_size, visual_len, self.all_head_size)
-        
+
         # Residual connections
         text_output = self.layer_norm(text_context + text_features)
         visual_output = self.layer_norm(visual_context + visual_features)
-        
+
         return text_output, visual_output
 
 class DocFormer(nn.Module):
@@ -263,12 +263,21 @@ class DocFormer(nn.Module):
             torch.nn.init.ones_(module.weight)
 
     
-    def forward(self, input_ids, bboxes, attention_mask, pixel_values, labels=None, task="finetune"):
+    def forward(
+    self, 
+    input_ids, 
+    bboxes, 
+    attention_mask, 
+    pixel_values, 
+    labels=None, 
+    task="finetune", 
+    **kwargs  # Accept extra keys to avoid forward errors
+):
         batch_size = input_ids.size(0)
         if self.config.training_stage == "text_pretrain":
             text_outputs = self.text_embeddings(input_ids=input_ids, attention_mask=attention_mask)
             text_features = text_outputs.last_hidden_state
-            
+
             # ALWAYS generate logits during text pretraining
             if self.classifier is not None:
                 logits = self.classifier(text_features[:, 0])
@@ -276,15 +285,15 @@ class DocFormer(nn.Module):
                 if labels is not None:
                     loss = nn.CrossEntropyLoss()(logits, labels)
                 return {"logits": logits, "loss": loss}
-        
+
         # Normal multimodal processing for other stages
         # Initialize text_features FIRST to avoid UnboundLocalError
         text_outputs = self.text_embeddings(input_ids=input_ids, attention_mask=attention_mask)
         text_features = text_outputs.last_hidden_state  # This was missing in error case
-        
+
         visual_features = self.visual_backbone(pixel_values)
-        spatial_features = self.spatial_embeddings(bboxes)
-        
+        spatial_features = self.spatial_embeddings(bboxes)  # USES bboxes as required
+
         # Ensure spatial features match sequence length
         seq_len = text_features.size(1)  # Now properly initialized
         visual_len = visual_features.size(1)
@@ -339,4 +348,3 @@ class DocFormer(nn.Module):
             return {"logits": logits, "loss": loss}
         
         return {"last_hidden_state": combined_features}
-

@@ -1,6 +1,6 @@
 #!/bin/bash -l
 
-#SBATCH --job-name=alldocformer_training     # Job name
+#SBATCH --job-name=all_class_dcformer_training     # Job name
 #SBATCH --output=logs/docformer_all_training_%j.out    # Standard output log
 #SBATCH --error=logs/docformer_all_training_%j.err     # Error log
 #SBATCH --partition=v100                  # GPU partition name
@@ -14,7 +14,6 @@
 unset SLURM_EXPORT_ENV
 
 # Load required modules
-# Load modules
 module load cuda/12.6
 module load python/3.12-conda
 conda activate mtil
@@ -25,63 +24,69 @@ export https_proxy=http://proxy:80
 # Move to the repository folder
 export PYTHONPATH=$PYTHONPATH:$(pwd)/FAU-Masters_Thesis-Ahad
 
-
 echo "Starting Progressive DocFormer Training..."
 
-# Configuration
-OCR_ENGINE=${1:-"trocr"} # tesseract, trocr, pero, easyocr, paddleocr
-DATA_DIR=${2:-"/home/woody/iwi5/iwi5280h/dataset/small_dataset"}
-OUTPUT_DIR="docformer_outputs_$(date +%Y%m%d_%H%M%S)"  
-CLASSES="advertisement,budget,email,file_folder,form,handwritten,invoice,letter,memo,news_article,presentation,questionnaire,resume,scientific_publication,scientific_report,specification"
-
-mkdir -p $OUTPUT_DIR
+# Configuration with defaults, override via script args if needed
+DATA_DIR=${1:-"/home/woody/iwi5/iwi5280h/dataset/all_prepdataset"}
+OCR_TOKEN_DIR=${2:-"/home/woody/iwi5/iwi5280h/dataset/all_dataset_ocr_texts_bbox_tesseract.pt"}
+OUTPUT_DIR="outputs/all_class_docformer_outputs_$(date +%Y%m%d_%H%M%S)"
+# Full set of classes available
+ALL_CLASSES="letter,form,email,handwritten,advertisement,scientific_report,scientific_publication,specification,file_folder,news_article,budget,invoice,presentation,questionnaire,resume,memo"
+# Common subset for training/evaluation
+CLASSES="letter,form,email,handwritten,advertisement,scientific_report,invoice,presentation,questionnaire,resume,memo"
+EVAL_ONLY="false"
+mkdir -p "$OUTPUT_DIR"
 mkdir -p logs
 
+# Check if EVAL_ONLY environment variable is set for evaluation
 if [ "$EVAL_ONLY" = "true" ]; then
     echo "=== Running Evaluation Only ==="
-    
-    # Check if there's an existing model to evaluate
     if [ ! -f "$OUTPUT_DIR/best_model.pt" ]; then
         echo "Error: No trained model found at $OUTPUT_DIR/best_model.pt"
         echo "Please train a model first or provide the correct output directory"
         exit 1
     fi
-    
+
     python src/sota_docformer_model.py \
         --data_dir "$DATA_DIR" \
+        --ocr_token_dir "$OCR_TOKEN_DIR" \
         --output_dir "$OUTPUT_DIR" \
-        --ocr_engine "$OCR_ENGINE" \
+        --classes "$ALL_CLASSES" \
+        --batch_size 8 \
+        --eval_batch_size 16 \
+        --num_epochs 1 \
         --classes "$CLASSES" \
         --evaluate_only
-        
+
 else
     echo "=== Starting Training ==="
-    
-    # Training with progressive stages
     python src/sota_docformer_model.py \
         --data_dir "$DATA_DIR" \
+        --ocr_token_dir "$OCR_TOKEN_DIR" \
         --output_dir "$OUTPUT_DIR" \
-        --ocr_engine "$OCR_ENGINE" \
         --classes "$CLASSES" \
-        --text_epochs 3 \
-        --visual_epochs 3 \
-        --final_epochs 5 \
         --batch_size 4 \
-        --finetune_batch_size 2 \
+        --eval_batch_size 8 \
+        --num_epochs 100 \
         --learning_rate 5e-5 \
         --finetune_lr 2.5e-5 \
-        --num_workers 2 \
-        --progressive
+        --num_workers 4 \
+        --max_seq_len 512 \
+        --weight_decay 0.01 \
+        --early_stop_patience 15 \
+        --training_stage finetune \
+        --use_amp
 
     echo "Training completed!"
-    
+
     echo "=== Starting Final Evaluation ==="
-    
-    # Run evaluation after training
     python src/sota_docformer_model.py \
         --data_dir "$DATA_DIR" \
+        --ocr_token_dir "$OCR_TOKEN_DIR" \
         --output_dir "$OUTPUT_DIR" \
-        --ocr_engine "$OCR_ENGINE" \
+        --batch_size 8 \
+        --eval_batch_size 16 \
+        --num_epochs 1 \
         --classes "$CLASSES" \
         --evaluate_only
 fi
@@ -90,6 +95,7 @@ echo "=== Process Completed ==="
 echo "Results saved to: $OUTPUT_DIR"
 echo "Training and Evaluation Completed."
 
+
 # sbatch run_docformermodel.sh
-#--data_dir /home/woody/iwi5/iwi5280h/dataset/prepdata \
+#--data_dir /home/woody/iwi5/iwi5280h/dataset/all_prepdataset \
 #"/home/woody/iwi5/iwi5280h/dataset/small_dataset"
