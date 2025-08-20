@@ -3,7 +3,7 @@ import json
 from typing import List, Dict, Optional
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 import torch
 from transformers import BertTokenizer
 
@@ -15,7 +15,7 @@ common_transform = transforms.Compose([
 ])
 
 def _normalize_class_name(name):
-    # Remove leading/trailing whitespace and quotes
+    # Removing leading/trailing whitespace and quotes
     return name.strip().strip("'").strip('"')
 
 # ========================== EAML Dataset for Class IL ==========================
@@ -103,8 +103,21 @@ class EAMLClassILDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        img_path, tokens, label = self.samples[idx]
-        image = Image.open(img_path).convert("RGB")
+        max_attempts = 10
+        attempts = 0
+        starting_idx = idx
+        while attempts < max_attempts:
+            img_path, tokens, label = self.samples[idx]
+            try:
+                image = Image.open(img_path).convert("RGB")
+                break
+            except (UnidentifiedImageError, OSError, IOError):
+                print(f"Warning: Skipping corrupt or unreadable image: {img_path}")
+                idx = (idx + 1) % len(self.samples)
+                attempts += 1
+        else:
+            raise RuntimeError(f"Too many consecutive corrupt images encountered, starting from idx {starting_idx}")
+
         if self.transform:
             image = self.transform(image)
         return {
@@ -115,6 +128,7 @@ class EAMLClassILDataset(Dataset):
             },
             "label": torch.tensor(self.class_to_idx[label])
         }
+
 
 def eaml_collate_fn(batch):
     return {
@@ -220,8 +234,7 @@ def get_class_il_loader(
                 dataset,
                 batch_size=batch_size,
                 num_workers=num_workers,
-                collate_fn=eaml_collate_fn,
-                pin_memory=True
+                collate_fn=eaml_collate_fn
             )
     elif model_type == "docformer":
         dataset = DocFormerClassILDataset(

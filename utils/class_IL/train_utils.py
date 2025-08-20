@@ -1,16 +1,47 @@
 import os
 import torch
 import time
-from tqdm import tqdm
+import torch
+import torch.nn as nn
 import numpy as np
-from sklearn.metrics import accuracy_score
+from tqdm import tqdm
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
 
 class CILMetrics:
     def __init__(self, class_names):
         self.num_classes = len(class_names)
         self.confusion_matrix = np.zeros((self.num_classes, self.num_classes))
+
+    def update(self, preds, labels):
+        for p, l in zip(preds, labels):
+            if 0 <= l < self.num_classes and 0 <= p < self.num_classes:
+                self.confusion_matrix[l, p] += 1
+
+    def get_metrics(self):
+        total = np.sum(self.confusion_matrix)
+        top1_acc = np.trace(self.confusion_matrix) / total if total > 0 else 0
+        correct_per_class = np.diag(self.confusion_matrix)
+        total_per_class = self.confusion_matrix.sum(axis=1)
+        class_acc = [(c/t if t > 0 else 0.0) for c, t in zip(correct_per_class, total_per_class)]
+        return {
+            'top1_acc': top1_acc,
+            'class_acc': class_acc,
+            'confusion_matrix': self.confusion_matrix.tolist(),
+        }
+
+class CILMetrics_old:
+    def __init__(self, class_names):
+        self.num_classes = len(class_names)
+        self.confusion_matrix = np.zeros((self.num_classes, self.num_classes))
         self.current_state = 0
         self.class_mapping = {0: class_names}
+
+    def flatten_classes(self):
+        """Return full list of classes across all states in order"""
+        all_classes = []
+        for s in sorted(self.class_mapping.keys()):
+            all_classes.extend(self.class_mapping[s])
+        return all_classes
 
     def update(self, preds, labels):
         for p, l in zip(preds, labels):
@@ -51,6 +82,21 @@ class CILMetrics:
         self.confusion_matrix = new_matrix
         self.num_classes = new_size
 
+    def state_dict(self):
+        return {
+            'confusion_matrix': self.confusion_matrix,
+            'class_mapping': self.class_mapping,
+            'current_state': self.current_state,
+            'num_classes': self.num_classes
+        }
+
+    def load_state_dict(self, state):
+        self.confusion_matrix = state['confusion_matrix']
+        self.class_mapping = state['class_mapping']
+        self.current_state = state['current_state']
+        self.num_classes = state['num_classes']
+
+"""
 def save_checkpoint(model, optimizer, epoch, path):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     torch.save({
@@ -60,6 +106,31 @@ def save_checkpoint(model, optimizer, epoch, path):
     }, path)
     print(f"Checkpoint saved to {path}")
 
+def save_checkpoint(model, optimizer, epoch, path, extra_data=None):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    state = {
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+    }
+    if extra_data is not None:
+        state.update(extra_data)
+    torch.save(state, path)
+    print(f"Checkpoint saved to {path}")
+"""
+def save_checkpoint(model, optimizer, epoch, path, extra_data=None):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    state = {
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+    }
+    if extra_data is not None:
+        state.update(extra_data)
+    torch.save(state, path)
+    print(f"Checkpoint saved to {path}")
+
+"""
 def load_checkpoint(model, optimizer, path, device):
     if not os.path.exists(path):
         print(f"No checkpoint found at {path}")
@@ -69,26 +140,42 @@ def load_checkpoint(model, optimizer, path, device):
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     print(f"Loaded checkpoint from {path} (epoch {checkpoint['epoch']})")
     return checkpoint['epoch']
+"""
+
+def load_checkpoint(model, optimizer, path, device, metrics=None):
+    if not os.path.exists(path):
+        print(f"No checkpoint found at {path}")
+        return 0
+    checkpoint = torch.load(path, map_location=device)
+    model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    if optimizer is not None and 'optimizer_state_dict' in checkpoint:
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    if metrics is not None and 'metrics_state' in checkpoint:
+        metrics.load_state_dict(checkpoint['metrics_state'])
+        print(f"Restored metrics state from checkpoint with {metrics.num_classes} classes")
+    print(f"Loaded checkpoint from {path} (epoch {checkpoint['epoch']})")
+    return checkpoint['epoch']
+
 
 def train_one_epoch_cil(model, dataloader, optimizer, criterion, device, metrics):
-    """Train model for one epoch"""
     model.train()
     total_loss = 0
-    all_preds, all_labels = [], []
-    
+    all_preds = []
+    all_labels = []
+
     for batch in tqdm(dataloader, desc="Training"):
         optimizer.zero_grad()
-        
-        # Handle both model types
-        if "images" in batch:  # EAML
-            inputs = {
-                'images': batch['images'].to(device),
-                'input_ids': batch['texts']['input_ids'].to(device),
-                'attention_mask': batch['texts']['attention_mask'].to(device)
-            }
+        # --- EAML ---
+        if "images" in batch:  
+            images = batch['images'].to(device)
+            input_ids = batch['texts']['input_ids'].to(device)
+            attention_mask = batch['texts']['attention_mask'].to(device)
             labels = batch['labels'].to(device)
-            outputs = model(**inputs)
-        else:  # DocFormer
+            outputs = model(images=images, input_ids=input_ids, attention_mask=attention_mask)
+            logits = outputs['logits'] if isinstance(outputs, dict) else outputs
+
+        # --- DocFormer ---
+        else:
             inputs = {
                 'pixel_values': batch['pixel_values'].to(device),
                 'input_ids': batch['input_ids'].to(device),
@@ -97,43 +184,116 @@ def train_one_epoch_cil(model, dataloader, optimizer, criterion, device, metrics
             }
             labels = batch['labels'].to(device)
             outputs = model(**inputs, task="classification")
-        
-        # Extract logits from model output (which is a dictionary)
-        if isinstance(outputs, dict) and 'logits' in outputs:
             logits = outputs['logits']
-        else:
-            logits = outputs
 
         loss = criterion(logits, labels)
         loss.backward()
         optimizer.step()
-        
+
         preds = torch.argmax(logits, dim=1)
         all_preds.extend(preds.detach().cpu().tolist())
         all_labels.extend(labels.cpu().tolist())
         metrics.update(preds.cpu().numpy(), labels.cpu().numpy())
         total_loss += loss.item()
-    
-    acc = accuracy_score(all_labels, all_preds)
-    print(f"Train Loss: {total_loss/len(dataloader):.4f} | Acc: {acc:.4f}")
 
-    epoch_metrics = metrics.get_metrics()
-    print(f"Train Loss: {total_loss/len(dataloader):.4f} | Acc: {epoch_metrics['top1_acc']:.4f}")
-    return epoch_metrics
+    epoch_loss = total_loss / len(dataloader)
+    label_acc = accuracy_score(all_labels, all_preds)
+    metric_dict = metrics.get_metrics()
+    prec = precision_score(all_labels, all_preds, average='macro', zero_division=0)
+    rec = recall_score(all_labels, all_preds, average='macro', zero_division=0)
+    f1 = f1_score(all_labels, all_preds, average='macro', zero_division=0)
 
-def evaluate(model, dataloader, device, metrics,full_model_acc, evm=None, use_evm=False):
+    metric_dict.update({
+        'loss': epoch_loss,
+        'label_acc': label_acc,
+        'preds': all_preds,
+        'labels': all_labels,
+        'precision': prec,
+        'recall': rec,
+        'f1': f1
+    })
+
+    print(f"Train Loss: {epoch_loss:.4f} | Label Acc: {label_acc:.4f} | Epoch Acc: {metric_dict['top1_acc']:.4f}")
+    print(f"Precision: {prec:.4f} | Recall: {rec:.4f} | F1: {f1:.4f}")
+
+    return metric_dict
+
+def train_one_epoch_cil(
+        model,
+        dataloader,
+        optimizer,
+        criterion,
+        device,
+        metrics,
+        inc_strategy,
+        old_model=None,
+        ewc=None
+    ):
+    model.train()
+    total_loss = 0
+    all_preds = []
+    all_labels = []
+
+    for batch in tqdm(dataloader):
+        optimizer.zero_grad()
+        # Have to use strategy-specific loss (handles distillation, EWC, etc)
+        loss, preds, labels = inc_strategy.compute_loss(
+            model, batch, criterion, old_model=old_model, ewc=ewc
+        )
+        print(f"Batch total loss: {loss.item()}")
+        loss.backward()
+        optimizer.step()
+
+        all_preds.extend(preds.detach().cpu().tolist())
+        all_labels.extend(labels.cpu().tolist())
+        metrics.update(preds.cpu().numpy(), labels.cpu().numpy())
+        total_loss += loss.item()
+
+    epoch_loss = total_loss / len(dataloader)
+    label_acc = accuracy_score(all_labels, all_preds)
+    metric_dict = metrics.get_metrics()
+    prec = precision_score(all_labels, all_preds, average='macro', zero_division=0)
+    rec = recall_score(all_labels, all_preds, average='macro', zero_division=0)
+    f1 = f1_score(all_labels, all_preds, average='macro', zero_division=0)
+
+    metric_dict.update({
+        'loss': epoch_loss,
+        'label_acc': label_acc,
+        'preds': all_preds,
+        'labels': all_labels,
+        'precision': prec,
+        'recall': rec,
+        'f1': f1
+    })
+
+    print(f"Train Loss: {epoch_loss:.4f} | Label Acc: {label_acc:.4f} | Epoch Acc: {metric_dict['top1_acc']:.4f}")
+    print(f"Precision: {prec:.4f} | Recall: {rec:.4f} | F1: {f1:.4f}")
+
+    return metric_dict
+
+
+def evaluate(model, dataloader, device, metrics, full_acc=None, evm=None, use_evm=False):
     model.eval()
-    all_preds, all_labels = [], []
+    total_loss = 0
+    num_batches = 0
+    all_preds = []
+    all_labels = []
+    criterion = nn.CrossEntropyLoss()
+
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Evaluating"):
             try:
-                if "images" in batch:  # EAML
+                # --- EAML ---
+                if "images" in batch:
                     images = batch['images'].to(device)
-                    texts = {k: v.to(device) for k, v in batch['texts'].items()}
+                    input_ids = batch['texts']['input_ids'].to(device)
+                    attention_mask = batch['texts']['attention_mask'].to(device)
                     labels = batch['labels'].to(device)
-                    outputs = model(images=images, texts=texts)
-                    logits = outputs
-                else:  # DocFormer
+                    outputs = model(images=images, input_ids=input_ids, attention_mask=attention_mask)
+                    logits = outputs['logits'] if isinstance(outputs, dict) else outputs
+
+                # --- DocFormer ---
+                else:
                     inputs = {
                         'pixel_values': batch['pixel_values'].to(device),
                         'input_ids': batch['input_ids'].to(device),
@@ -143,24 +303,45 @@ def evaluate(model, dataloader, device, metrics,full_model_acc, evm=None, use_ev
                     labels = batch['labels'].to(device)
                     outputs = model(**inputs, task="classification")
                     logits = outputs['logits']
+
+                loss = criterion(logits, labels)
+                total_loss += loss.item()
+                num_batches += 1
+
                 preds = torch.argmax(logits, dim=1)
                 all_preds.extend(preds.cpu().tolist())
                 all_labels.extend(labels.cpu().tolist())
                 metrics.update(preds.cpu().numpy(), labels.cpu().numpy())
+
             except Exception as e:
-                print(f"Error processing batch during evaluation: {e}")
+                print(f"Error processing batch: {e}")
                 continue
-    acc = accuracy_score(all_labels, all_preds)
+
+    eval_loss = total_loss / num_batches if num_batches > 0 else 0
+    label_acc = accuracy_score(all_labels, all_preds)
     eval_metrics = metrics.get_metrics()
-    g_il = None
-    if full_model_acc is not None and 'top1_acc' in eval_metrics:
-        g_il = (eval_metrics['top1_acc']- full_model_acc) / (1 - full_model_acc)
-        print(f"Incremental Learning Gap (G_IL): {g_il:.4f}")
+    prec = precision_score(all_labels, all_preds, average='macro', zero_division=0)
+    rec = recall_score(all_labels, all_preds, average='macro', zero_division=0)
+    f1 = f1_score(all_labels, all_preds, average='macro', zero_division=0)
+
+    eval_metrics.update({
+        'loss': eval_loss,
+        'label_acc': label_acc,
+        'preds': all_preds,
+        'labels': all_labels,
+        'precision': prec,
+        'recall': rec,
+        'f1': f1
+    })
+
+    gil = None
+    if full_acc is not None and 'top1_acc' in eval_metrics:
+        gil = (eval_metrics['top1_acc'] - full_acc) / (1 - full_acc)
+        print(f"Incremental Learning Gap (GIL): {gil:.4f}")
+
     print("\nEvaluation Results:")
-    print(f"Total Accuracy: {eval_metrics.get('top1_acc', acc):.4f}")
-    if 'past_acc' in eval_metrics:
-        print(f"Previous Classes Accuracy: {eval_metrics['past_acc']:.4f}")
-        print(f"New Classes Accuracy: {eval_metrics['new_acc']:.4f}")
-    if g_il is not None:
-        print(f"Incremental Learning Gap (G_IL): {g_il:.4f}")
+    print(f"Loss: {eval_loss:.4f} | Label Acc: {label_acc:.4f} | Epoch Acc: {eval_metrics.get('top1_acc', label_acc):.4f}")
+    print(f"Precision: {prec:.4f} | Recall: {rec:.4f} | F1: {f1:.4f}")
+
     return eval_metrics
+

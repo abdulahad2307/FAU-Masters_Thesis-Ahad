@@ -7,8 +7,8 @@ import random
 class ExemplarManager:
     """Manages exemplars for replay-based class incremental learning."""
 
-    def __init__(self, max_exemplars=200, max_per_class=20, selection_strategy="herding"):
-        self.exemplars = {}  # class_name -> list of examples
+    def __init__(self, max_exemplars=320, max_per_class=20, selection_strategy="herding"):
+        self.exemplars = {}
         self.max_exemplars = max_exemplars
         self.max_per_class = max_per_class
         self.selection_strategy = selection_strategy

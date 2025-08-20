@@ -1,8 +1,8 @@
 #!/bin/bash -l
 
-#SBATCH --job-name=eaml_cil_evm          # Job name
-#SBATCH --output=logs/cil_test_evm_%j.out    # Standard output log
-#SBATCH --error=logs/cil_test_evm_%j.err     # Error log
+#SBATCH --job-name=eaml_cil_evm_with_bsamp_with_bcor          # Job name
+#SBATCH --output=logs/cil_eaml_evm_11%j.out    # Standard output log
+#SBATCH --error=logs/cil_eaml_evm_11%j.err     # Error log
 #SBATCH --partition=v100                 # GPU partition name
 #SBATCH --nodes=1                        # Number of nodes
 #SBATCH --ntasks=1                       # Number of tasks
@@ -26,25 +26,27 @@ export PYTHONPATH=$PYTHONPATH:$(pwd)/FAU-Masters_Thesis-Ahad
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export CUDA_LAUNCH_BLOCKING=1
+
+DATA_DIR="/home/woody/iwi5/iwi5280h/dataset/all_prepdataset"
 OCR_TENSOR_PATH="/home/woody/iwi5/iwi5280h/dataset/all_dataset_ocr_texts_tesseract.pt"
 BASE_MODEL="/home/hpc/iwi5/iwi5280h/projects/FAU-Masters_Thesis-Ahad/outputs/all_eaml_SGD_tesseract_20250805_223607/eaml_best_model.pt"
-CKPT_DIR="outputs/eaml_CIL/_cil_$(date +%Y%m%d_%H%M%S)"
+CKPT_DIR="outputs/eaml_cil_evm_with_bsamp_with_bcor_$(date +%Y%m%d_%H%M%S)"
 
 ALL_CLASSES="letter,form,email,handwritten,advertisement,scientific_report,scientific_publication,specification,file_folder,news_article,budget,invoice,presentation,questionnaire,resume,memo"
 # Subset trained on
-CLASSES="letter,form,email,handwritten,advertisement,scientific_report,invoice,presentation,questionnaire,resume,memo"
+BASE_CLASSES="letter,form,email,handwritten,advertisement,scientific_report,invoice,presentation,questionnaire,resume,memo"
 mkdir -p $CKPT_DIR
 
 echo "Starting Class Incremental Learning WITH EVM..."
 
 python src/class_incremental_evm.py \
-  --data_dir /home/woody/iwi5/iwi5280h/dataset/all_prepdataset \
-  --ocr_tensor_path $OCR_TENSOR_PATH\
-  --checkpoint_dir $CKPT_DIR \
+  --data_dir "$DATA_DIR"  \
+  --ocr_tensor_path "$OCR_TENSOR_PATH" \
+  --checkpoint_dir "$CKPT_DIR" \
   --model_name "eaml" \
-  --class_order $ALL_CLASSES \
-  --start_step 11 \
-  --batch_size 16 \
+  --all_classes "$ALL_CLASSES" \
+  --base_classes "$BASE_CLASSES" \
+  --batch_size 8 \
   --lr 1e-3 \
   --num_epochs 50 \
   --strategy "distillation" \
@@ -53,15 +55,20 @@ python src/class_incremental_evm.py \
   --lambda_ewc 5000.0 \
   --use_ewc \
   --use_exemplars \
-  --max_exemplars 200 \
+  --max_exemplars 320 \
   --exemplar_selection "herding" \
   --training_mode "last_layer" \
-  --base_model_path $BASE_MODEL\
-  --evm_tailsize 0.5 \
-  --evm_threshold 0.7\
+  --base_model_path "$BASE_MODEL" \
+  --evm_tailsize 0.3 \
+  --evm_threshold 0.7 \
   --full_model_acc 0.953
 
+  #--resume \
+  #--resume_checkpoint "$RESUME_CKPT" \
+  #--global_best_acc <previous_global_best_acc>
+
 echo "Class Incremental Learning WITH EVM Completed."
+
 
 # To run:
 # sbatch run_classIL_evm.sh

@@ -31,14 +31,14 @@ class StandardIncremental(IncrementalStrategy):
             in_features = model.classifier.in_features
             model.classifier = nn.Linear(in_features, new_num_classes)
             
-            # Copy old weights
+            # Copying old weights
             with torch.no_grad():
                 model.classifier.weight.data[:old_num_classes] = old_classifier
                 if old_bias is not None and model.classifier.bias is not None:
                     model.classifier.bias.data[:old_num_classes] = old_bias
                     
         elif model_name == "eaml":
-            # Save old classifier weights
+            # Saving old classifier weights
             old_image_classifier = model.image_classifier.weight.data.clone()
             old_image_bias = model.image_classifier.bias.data.clone()
             old_text_classifier = model.text_classifier.weight.data.clone()
@@ -46,28 +46,33 @@ class StandardIncremental(IncrementalStrategy):
             old_fusion_classifier = model.fusion_classifier.weight.data.clone()
             old_fusion_bias = model.fusion_classifier.bias.data.clone()
             
-            # Initialize new classifiers
+            # Initializing new classifiers
             model.image_classifier = nn.Linear(model.image_classifier.in_features, new_num_classes)
             model.text_classifier = nn.Linear(model.text_classifier.in_features, new_num_classes)
             model.fusion_classifier = nn.Linear(model.fusion_classifier.in_features, new_num_classes)
             
-            # Copy old weights
+            # Copy overlapping weights safely
             with torch.no_grad():
-                model.image_classifier.weight.data[:old_num_classes] = old_image_classifier
-                model.image_classifier.bias.data[:old_num_classes] = old_image_bias
-                model.text_classifier.weight.data[:old_num_classes] = old_text_classifier
-                model.text_classifier.bias.data[:old_num_classes] = old_text_bias
-                model.fusion_classifier.weight.data[:old_num_classes] = old_fusion_classifier
-                model.fusion_classifier.bias.data[:old_num_classes] = old_fusion_bias
+                num_copy_img = min(old_num_classes, old_image_classifier.size(0), model.image_classifier.weight.data.size(0))
+                model.image_classifier.weight.data[:num_copy_img] = old_image_classifier[:num_copy_img]
+                model.image_classifier.bias.data[:num_copy_img] = old_image_bias[:num_copy_img]
+
+                num_copy_txt = min(old_num_classes, old_text_classifier.size(0), model.text_classifier.weight.data.size(0))
+                model.text_classifier.weight.data[:num_copy_txt] = old_text_classifier[:num_copy_txt]
+                model.text_classifier.bias.data[:num_copy_txt] = old_text_bias[:num_copy_txt]
+
+                num_copy_fus = min(old_num_classes, old_fusion_classifier.size(0), model.fusion_classifier.weight.data.size(0))
+                model.fusion_classifier.weight.data[:num_copy_fus] = old_fusion_classifier[:num_copy_fus]
+                model.fusion_classifier.bias.data[:num_copy_fus] = old_fusion_bias[:num_copy_fus]
+
                     
         return model
 
     def compute_loss(self, model, batch, criterion, old_model=None, ewc=None):
-        # Handle both model types
         if "images" in batch:  # EAML
             images = batch['images'].to(self.device)
             texts = batch['texts']
-            # Move text tensors to device
+            # Moving text tensors to device
             texts = {k: v.to(self.device) for k, v in texts.items()}
             labels = batch['labels'].to(self.device)
             
@@ -88,7 +93,7 @@ class StandardIncremental(IncrementalStrategy):
         # Classification loss
         loss = criterion(logits, labels)
         
-        # Add EWC regularization if available
+        # Adding EWC regularization if available
         if ewc is not None:
             ewc_loss = ewc.penalty(model)
             loss += ewc_loss
@@ -109,11 +114,10 @@ class DistillationIncremental(IncrementalStrategy):
 
     def compute_loss(self, model, batch, criterion, old_model=None, ewc=None):
         """Compute loss with distillation component"""
-        # Handle both model types
         if "images" in batch:  # EAML
             images = batch['images'].to(self.device)
             texts = batch['texts']
-            # Move text tensors to device
+            # Moving text tensors to device
             texts = {k: v.to(self.device) for k, v in texts.items()}
             labels = batch['labels'].to(self.device)
             
@@ -128,23 +132,30 @@ class DistillationIncremental(IncrementalStrategy):
                 with torch.no_grad():
                     old_outputs = old_model(images=images, texts=texts)
                     old_logits = old_outputs
+                old_class_count = old_logits.size(1)
+                print(f"Student logits shape: {logits.shape}")
+                print(f"Teacher logits shape: {old_logits.shape}")
+                print(f"Old class count: {old_class_count}")
                     
-                # Only apply distillation to old classes
+                # Only applying distillation to old classes
                 old_class_count = old_logits.size(1)
                 
-                # Get soft targets from old model
+                # Getting soft targets from old model
                 soft_targets = nn.functional.softmax(old_logits / self.temperature, dim=1)
                 
-                # Get soft probabilities from current model (only for old classes)
+                # Getting soft probabilities from current model (only for old classes)
                 soft_probs = nn.functional.log_softmax(logits[:, :old_class_count] / self.temperature, dim=1)
                 
-                # Calculate distillation loss
+                # Calculating distillation loss
                 dist_loss = -torch.sum(soft_targets * soft_probs) / soft_probs.size(0)
                 
                 # Combined loss
                 loss = cls_loss + self.lambda_distill * dist_loss
             else:
                 loss = cls_loss
+
+                print(f"Classification loss: {cls_loss.item()}, Distillation loss: {dist_loss.item() if old_model is not None else 'N/A'}, EWC loss: {ewc_loss.item() if ewc is not None else 'N/A'}")
+
                 
         else:  # DocFormer
             inputs = {
@@ -166,16 +177,16 @@ class DistillationIncremental(IncrementalStrategy):
                     old_outputs = old_model(**inputs, task="classification")
                     old_logits = old_outputs['logits']
                     
-                # Only apply distillation to old classes
+                # Only applying distillation to old classes
                 old_class_count = old_logits.size(1)
                 
-                # Get soft targets from old model
+                # Getting soft targets from old model
                 soft_targets = nn.functional.softmax(old_logits / self.temperature, dim=1)
                 
-                # Get soft probabilities from current model (only for old classes)
+                # Getting soft probabilities from current model (only for old classes)
                 soft_probs = nn.functional.log_softmax(logits[:, :old_class_count] / self.temperature, dim=1)
                 
-                # Calculate distillation loss
+                # Calculating distillation loss
                 dist_loss = -torch.sum(soft_targets * soft_probs) / soft_probs.size(0)
                 
                 # Combined loss
@@ -183,7 +194,7 @@ class DistillationIncremental(IncrementalStrategy):
             else:
                 loss = cls_loss
         
-        # Add EWC regularization if available
+        # Adding EWC regularization if available
         if ewc is not None:
             ewc_loss = ewc.penalty(model)
             loss += ewc_loss
@@ -297,7 +308,7 @@ class ExemplarManager:
                  max_exemplars=200, 
                  max_per_class=20, 
                  selection_strategy="herding"):
-        self.exemplars = {}  # class_name -> list of examples
+        self.exemplars = {}
         self.max_exemplars = max_exemplars
         self.max_per_class = max_per_class
         self.selection_strategy = selection_strategy
@@ -452,28 +463,31 @@ class AdaptiveLR:
         for param_group in self.optimizer.param_groups:
             param_group['lr'] = adjusted_lr
 
-def extract_features(model, dataloader, device):
+def extract_features(model, dataloader, device, max_samples_per_class=None):
     """
-    Extract features for EVM classifier in a model-agnostic way.
+    Extract features for EVM classifier in a model-agnostic way, with optional per-class sample limit.
     Returns: Dict[class_name, np.ndarray of features]
     """
+    from collections import defaultdict
+    import random
+
     model.eval()
-    features = {}
-    
+    features = defaultdict(list)
+
     with torch.no_grad():
         for batch in dataloader:
             if "images" in batch:  # EAML
                 images = batch['images'].to(device)
                 texts = {k: v.to(device) for k, v in batch['texts'].items()}
                 labels = batch['labels'].to(device)
-                
+
                 # Prefer model.extract_features if available
                 if hasattr(model, 'extract_features'):
                     batch_features = model.extract_features(images=images, texts=texts)
                 else:
                     outputs = model(images=images, texts=texts, return_features=True)
                     batch_features = outputs['fused_feat']
-                    
+
             else:  # DocFormer
                 inputs = {
                     'pixel_values': batch['pixel_values'].to(device),
@@ -484,16 +498,17 @@ def extract_features(model, dataloader, device):
                 labels = batch['labels'].to(device)
                 outputs = model(**inputs, task="classification")
                 batch_features = outputs['features'] if 'features' in outputs else outputs['logits']
-                
+
             # Group features by class
             for i, label in enumerate(labels.cpu().numpy()):
                 class_name = dataloader.dataset.current_classes[label]
-                if class_name not in features:
-                    features[class_name] = []
                 features[class_name].append(batch_features[i].cpu().numpy())
-                
-    # Convert lists to numpy arrays
+
+    # If max_samples_per_class is set, randomly sample up to that many per samples class
     for class_name in features:
+        if max_samples_per_class is not None and len(features[class_name]) > max_samples_per_class:
+            features[class_name] = random.sample(features[class_name], max_samples_per_class)
         features[class_name] = np.vstack(features[class_name])
-        
+
     return features
+

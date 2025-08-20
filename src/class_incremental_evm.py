@@ -1,57 +1,68 @@
 import os
-import time
 import torch
 import torch.nn as nn
+import numpy as np
 from typing import List, Optional
+from sklearn.metrics import precision_score, recall_score, f1_score
 
 from utils.eaml.eaml_model import EAMLModel
 from utils.docformer.model import DocFormer
 from utils.docformer.config import DocFormerConfig
-from utils.class_IL.dataloader_utils import get_class_il_loader
+from utils.class_IL.dataloader_utils import get_class_il_loader, EAMLClassILDataset, common_transform, eaml_collate_fn
 from utils.class_IL.train_utils import (
-    save_checkpoint, load_checkpoint, evaluate, CILMetrics, train_one_epoch_cil
+    save_checkpoint, load_checkpoint, train_one_epoch_cil, evaluate, CILMetrics
 )
 from utils.class_IL.cil_utils import (
     StandardIncremental, DistillationIncremental, EWC, ExemplarManager, AdaptiveLR, extract_features
 )
 from utils.class_IL.training_modes import get_training_mode
 from utils.evm.evm_classifier import EVMClassifier
+from utils.evm.evm_eval import evm_openset_metrics
+from utils.evm.evm_viz import plot_openset_histograms
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def get_unseen_classes(base_classes: List[str], all_classes: List[str]) -> List[str]:
+    return [cls for cls in all_classes if cls not in base_classes]
+
 
 def run_incremental_learning_evm(
     data_root: str,
     ocr_tensor_path: str,
-    class_order: List[str],
+    all_classes: List[str],
+    base_classes: List[str],
     base_model_path: str,
     model_name: str,
     checkpoint_dir: str,
-    start_step: int = 0,
     batch_size: int = 8,
-    lr: float = 2e-5,
+    lr: float = 1e-3,
+    weight_decay: float = 0.01,
     num_epochs: int = 10,
     strategy: str = "distillation",
     temperature: float = 2.0,
     lambda_distill: float = 1.0,
     lambda_ewc: float = 5000.0,
-    use_ewc: bool = False,
-    use_exemplars: bool = False,
-    max_exemplars: int = 200,
+    use_ewc: bool = True,
+    use_exemplars: bool = True,
+    max_exemplars: int = 320,
     exemplar_selection: str = "herding",
     training_mode: str = "last_layer",
     trainable_layers: Optional[List[str]] = None,
+    resume: bool = False,
     resume_checkpoint: Optional[str] = None,
+    global_best_acc: float = 0.0,
+    full_model_acc: Optional[float] = None,
+    patience: int = 10,
+    use_balanced_sampler: bool = True,
+    use_bias_correction: bool = False,
     evm_tailsize: float = 0.5,
-    evm_threshold: float = 0.7,
-    full_model_acc: float = 0.0,
-    weight_decay: float = 1e-4
+    evm_threshold: float = 0.7
 ):
+    import shutil
+    from torch.utils.data import WeightedRandomSampler, DataLoader
+
     os.makedirs(checkpoint_dir, exist_ok=True)
-    print("Starting Class Incremental Learning with EVM...")
-
-    initial_classes = class_order[:start_step + 1] if start_step > 0 else [class_order[0]]
-    metrics = CILMetrics(initial_classes)
-
     if strategy == "distillation":
         inc_strategy = DistillationIncremental(DEVICE, temperature, lambda_distill)
     else:
@@ -62,153 +73,303 @@ def run_incremental_learning_evm(
         selection_strategy=exemplar_selection
     ) if use_exemplars else None
 
-    best_acc = 0.0
-    best_model_path = None
-    old_model = None
+    unseen_classes = get_unseen_classes(base_classes, all_classes)
+    current_classes = base_classes.copy()
+    print(f"Base classes: {base_classes}")
+    start_unseen_index = 0
+    final_global_best_path = None
     ewc = None
-    evm = EVMClassifier(tailsize=evm_tailsize, cover_threshold=evm_threshold)
+    evm = EVMClassifier(tailsize=evm_tailsize, cover_threshold=evm_threshold)  # EVM setup
+    model = None
 
-    for step in range(start_step, len(class_order)):
-        current = class_order[:step + 1]
-        previous = class_order[:step]
-        new_cls = [class_order[step]] if step > start_step else []
+    if resume and resume_checkpoint and os.path.exists(resume_checkpoint):
+        checkpoint = torch.load(resume_checkpoint, map_location=DEVICE)
+        current_classes = checkpoint.get("current_classes", base_classes.copy())
+        start_unseen_index = checkpoint.get("unseen_index", 0)
+        print(f"Current classes restored: {current_classes}")
+        print(f"Will resume at unseen index: {start_unseen_index}")
+        del checkpoint
+        torch.cuda.empty_cache()
 
-        print(f"\n=== Step {step+1}/{len(class_order)} - Classes: {current} ===")
-        if step > start_step:
-            metrics.incremental_state_update(new_cls)
+    base_model_acc = full_model_acc
 
-        train_loader = get_class_il_loader(model_name, os.path.join(data_root, "train"), current, batch_size,ocr_data=ocr_tensor_path)
-        val_loader = get_class_il_loader(model_name, os.path.join(data_root, "val"), current, batch_size,ocr_data=ocr_tensor_path)
-        test_loader = get_class_il_loader(model_name, os.path.join(data_root, "test"), current, batch_size, ocr_data=ocr_tensor_path)
+    for unseen_idx, new_class in enumerate(unseen_classes[start_unseen_index:], start=start_unseen_index):
+        previous_classes = current_classes.copy()
+        current_classes.append(new_class)
+        print(f"\n= Incremental Step ({unseen_idx+1}/{len(unseen_classes)}) - Adding class: {new_class} =")
 
-        # Build model
+        replay_samples = []
+        if use_exemplars and exemplar_mgr is not None and unseen_idx > 0:
+            replay_samples = exemplar_mgr.get_exemplar_dataset()
+        new_data_samples = []
+        train_dataset = None
+        train_loader = None
+
+        if model_name == "eaml":
+            train_dataset = EAMLClassILDataset(
+                data_dir=os.path.join(data_root, "train"),
+                current_classes=current_classes,
+                ocr_data_path=ocr_tensor_path,
+                transform=common_transform
+            )
+            if use_exemplars and replay_samples:
+                new_data_samples = [s for s in train_dataset.samples if s[2] == new_class]
+                for i, s in enumerate(replay_samples + new_data_samples):
+                    assert isinstance(s, tuple) and len(s) == 3 and isinstance(s, str), \
+                        f"Sample at position {i} is not correct tuple: {type(s)}, {getattr(s, 'keys', lambda: None)() if isinstance(s, dict) else s}"
+                train_dataset.samples = replay_samples + new_data_samples
+                print(f"Using {len(replay_samples)} exemplars and {len(new_data_samples)} new samples for training.")
+            
+            # -------- BALANCED SAMPLER --------
+            if use_balanced_sampler:
+                from collections import Counter
+                #sample = train_dataset.samples[0]
+                #print("Sample length:", len(sample))
+                #for i, elem in enumerate(sample):
+                #    print(f"Index {i}: type={type(elem)} - preview: {str(elem)[:100]}")
+                class_counts = Counter([s[2] for s in train_dataset.samples])
+                total = sum(class_counts.values())
+                class_weights = {cls: total/count for cls, count in class_counts.items()}
+                sample_weights = [class_weights[s[2]] for s in train_dataset.samples]
+
+                sampler = WeightedRandomSampler(sample_weights, len(sample_weights), replacement=True)
+                train_loader = DataLoader(
+                    train_dataset,
+                    batch_size=batch_size,
+                    sampler=sampler,
+                    num_workers=4,
+                    collate_fn=eaml_collate_fn
+                )
+            else:
+                train_loader = DataLoader(
+                    train_dataset,
+                    batch_size=batch_size,
+                    shuffle=True,
+                    num_workers=4,
+                    collate_fn=eaml_collate_fn
+                )
+        else:
+            train_loader = get_class_il_loader(model_name, os.path.join(data_root, "train"), current_classes,
+                                               batch_size, ocr_data=ocr_tensor_path)
+        val_loader = get_class_il_loader(model_name, os.path.join(data_root, "val"), current_classes,
+                                         batch_size, ocr_data=ocr_tensor_path)
+        test_loader = get_class_il_loader(model_name, os.path.join(data_root, "test"), current_classes,
+                                          batch_size, ocr_data=ocr_tensor_path)
+        torch.cuda.empty_cache()
+
         if model_name == "docformer":
             cfg = DocFormerConfig()
-            nc = len(train_loader.dataset.class_to_idx)
-            model = DocFormer(cfg, num_classes=nc).to(cfg.device)
-        else:  # EAML
-            nc = len(initial_classes) if step == start_step else len(current)
-            model = EAMLModel(num_classes=nc).to(DEVICE)
+            model = DocFormer(cfg, num_classes=len(current_classes)).to(cfg.device)
+        else:
+            model = EAMLModel(num_classes=len(current_classes)).to(DEVICE)
 
-        # Load base checkpoint at first step
-        if step == start_step and os.path.exists(base_model_path):
-            checkpoint = torch.load(base_model_path, map_location=DEVICE)
-            state = checkpoint.get("model_state_dict", checkpoint)
-            own = model.state_dict()
-            for k, v in state.items():
-                if k in own and v.size() == own[k].size():
-                    own[k] = v
-            model.load_state_dict(own)
-            print(f"Loaded base model from {base_model_path}")
+        if resume and resume_checkpoint:
+            load_checkpoint(model, None, resume_checkpoint, DEVICE)
+            resume_checkpoint = None
+            resume = False
+        else:
+            if os.path.exists(base_model_path):
+                base_ckpt = torch.load(base_model_path, map_location=DEVICE)
+                state = base_ckpt.get("model_state_dict", base_ckpt)
+                own = model.state_dict()
+                for k, v in state.items():
+                    if k in own and v.size() == own[k].size():
+                        own[k] = v
+                model.load_state_dict(own, strict=False)
+                del base_ckpt
+                torch.cuda.empty_cache()
 
-        # Prepare old_model & EWC after first step
-        if step > start_step:
-            old_model = (
-                EAMLModel(num_classes=len(previous)).to(DEVICE)
-                if model_name == "eaml"
-                else DocFormer(cfg, num_classes=len(previous)).to(cfg.device)
-            )
-            prev_ckpt = os.path.join(checkpoint_dir, f"step_{step-1}_class_{previous[-1]}.pth")
-            if os.path.exists(prev_ckpt):
-                prev = torch.load(prev_ckpt, map_location=DEVICE)
-                old_model.load_state_dict(prev.get("model_state_dict", prev))
+        old_model = None
+        if len(previous_classes) > 0:
+            if model_name == "docformer":
+                old_model = DocFormer(cfg, num_classes=len(previous_classes)).to(cfg.device)
+            else:
+                old_model = EAMLModel(num_classes=len(previous_classes)).to(DEVICE)
+            if 'step_best_path' in locals() and step_best_path and os.path.exists(step_best_path):
+                prev_ckpt = torch.load(step_best_path, map_location=DEVICE)
+            elif os.path.exists(base_model_path):
+                prev_ckpt = torch.load(base_model_path, map_location=DEVICE)
+            else:
+                prev_ckpt = None
+            if prev_ckpt is not None:
+                old_model.load_state_dict(prev_ckpt.get("model_state_dict", prev_ckpt), strict=False)
+                del prev_ckpt
+                torch.cuda.empty_cache()
             old_model.eval()
-            model = inc_strategy.adapt_model(model, len(previous), len(current), model_name)
+            print(f"prev: {len(previous_classes)}, new: {len(current_classes)}")
+            model = inc_strategy.adapt_model(model, len(previous_classes), len(current_classes), model_name).to(DEVICE)
 
         tm = get_training_mode(model, training_mode, trainable_layers)
         model = tm.prepare_for_training()
-        optimizer = torch.optim.AdamW(tm.get_trainable_params(), lr=lr, weight_decay=weight_decay)
+        optimizer = torch.optim.AdamW(
+            tm.get_trainable_params(),
+            lr=lr,
+            weight_decay=weight_decay
+        )
         lr_sched = AdaptiveLR(optimizer, base_lr=lr)
-
-        # Resume from checkpoint if requested
-        start_epoch = 0
-        if resume_checkpoint and os.path.exists(resume_checkpoint):
-            start_epoch = load_checkpoint(model, optimizer, resume_checkpoint, DEVICE)
-
-        # EWC initialization
-        if use_ewc and step > start_step:
-            exemplar_loader = train_loader if not exemplar_mgr else \
-                get_class_il_loader(model_name, os.path.join(data_root, "train"), previous, batch_size)
-            ewc = EWC(old_model, exemplar_loader, DEVICE, lambda_ewc)
-
         criterion = nn.CrossEntropyLoss()
+        step_best_acc = 0.0
+        step_best_path = None
+        epochs_no_improve = 0
 
-        # --- EVM Feature Extraction and Training ---
-        features_by_class = extract_features(model, train_loader, DEVICE)
+        # ----------- TRAINING -----------
+        for epoch in range(num_epochs):
+            print(f"\n= Epoch {epoch+1}/{num_epochs} for Class {new_class} =")
+            train_metrics = CILMetrics(current_classes)
+            train_result = train_one_epoch_cil(
+                model,
+                train_loader,
+                optimizer,
+                criterion,
+                DEVICE,
+                train_metrics,
+                inc_strategy=inc_strategy,
+                old_model=old_model,
+                ewc=ewc if use_ewc else None
+            )
+            val_metrics = CILMetrics(current_classes)
+            val_result = evaluate(model, val_loader, DEVICE, val_metrics, None)
+            print(f"Train Loss: {train_result['loss']:.4f} | Train Acc: {train_result['top1_acc']:.4f}")
+            print(f"Val Loss: {val_result['loss']:.4f} | Val Acc: {val_result['top1_acc']:.4f}")
+            if val_result['top1_acc'] > step_best_acc:
+                step_best_acc = val_result['top1_acc']
+                epochs_no_improve = 0
+                step_best_path = os.path.join(checkpoint_dir, f"best_step_class_{new_class}.pth")
+                save_checkpoint(model, optimizer, epoch+1, step_best_path,
+                                extra_data={
+                                    "current_classes": current_classes,
+                                    "unseen_index": unseen_idx + 1
+                                })
+                test_metrics = CILMetrics(current_classes)
+                test_result = evaluate(model, test_loader, DEVICE, test_metrics, full_model_acc)
+                print("Class-wise Test Accuracy:")
+                for cls, acc in zip(current_classes, test_result['class_acc']):
+                    print(f"  {cls}: {acc:.4f}")
+                if full_model_acc is not None:
+                    gil = (test_result['top1_acc'] - full_model_acc) / (1 - full_model_acc)
+                    print(f"GIL (wrt base): {gil:.4f}")
+                # -------- EVM ---------
+                if use_exemplars and evm.initialized:
+                    print("Running EVM open set evaluation on validation set...")
+                    # Extract features for val set
+                    val_features_dict = extract_features(model, val_loader, DEVICE)
+                    os_result = evm_openset_metrics(evm, val_features_dict, known_classes=current_classes)
+                    print(f"[EVM Open Set Val] Known acc: {os_result['open_set_accuracy']:.4f}, Unknown rejection: {os_result['unknown_rejection']:.4f}")
+
+            else:
+                epochs_no_improve += 1
+                print(f"Patience counter: {epochs_no_improve}/{patience}")
+                if epochs_no_improve >= patience:
+                    print(f"Early stopping at epoch {epoch+1} due to no improvement in val accuracy for {patience} epochs.")
+                    break
+            lr_sched.step(val_result['top1_acc'])
+            torch.cuda.empty_cache()
+
+        # ---------- EWC ----------
+        if use_ewc:
+            print(f"Updating EWC Fisher information for increment {unseen_idx+1}...")
+            ewc = EWC(model, train_loader, DEVICE, lambda_ewc)
+        # ---------- EXEMPLAR UPDATE ----------
+        if use_exemplars and exemplar_mgr is not None:
+            exemplar_mgr.update(train_loader.dataset, new_class, model)
+            for cls in exemplar_mgr.exemplars:
+                print(f"Exemplar samples for {cls}: {len(exemplar_mgr.exemplars[cls])}")
+
+        # ---------- BIAS CORRECTION ----------
+        if use_bias_correction:
+            if hasattr(model, "fusion_classifier"):
+                print("Applying bias correction to last (fusion) classifier.")
+                with torch.no_grad():
+                    mean_bias = model.fusion_classifier.bias.mean().item()
+                    model.fusion_classifier.bias[:] -= mean_bias
+
+        # ---------- EVM UPDATE (after exemplars and before next increment) ----------
+        print("Extracting features for EVM fitting...")
+        feature_loader = DataLoader(
+            train_dataset, batch_size=32, shuffle=False, num_workers=2, collate_fn=eaml_collate_fn
+        )
+        features_by_class = extract_features(model, feature_loader, DEVICE)
+        del feature_loader 
+        torch.cuda.empty_cache()
         evm.fit(features_by_class)
+        print("Fitted EVM for current step.")
+        # FINALIZE MODEL SELECTION FOR NEXT INCREMENT
+        if step_best_path and os.path.exists(step_best_path):
+            base_model_path = step_best_path
+        else:
+            print("Waaarning: No best checkpoint found for this increment. Skipping base_model_path update.")
+        if unseen_idx == len(unseen_classes) - 1:
+            if step_best_path and os.path.exists(step_best_path):
+                final_global_best_path = os.path.join(checkpoint_dir, "final_global_best_model.pth")
+                shutil.copy(step_best_path, final_global_best_path)
+                print(f"Final Global Best Model saved: {final_global_best_path}")
+                torch.cuda.empty_cache()
+            else:
+                print("Warning: No best checkpoint found for the last incremental step. Not saving final global best model.")
 
-        for epoch in range(start_epoch, num_epochs):
-            print(f"\n=== Epoch {epoch+1}/{num_epochs} ===")
-            # --- Train ---
-            train_metrics = train_one_epoch_cil(model, train_loader, optimizer, criterion, DEVICE, metrics)
-            train_loss = train_metrics.get('loss', 0)
-            train_acc = train_metrics.get('top1_acc', 0)
-            # --- Validate ---
-            val_metrics = evaluate(model, val_loader, DEVICE, metrics, full_model_acc, evm=evm, use_evm=True)
-            val_acc = val_metrics.get('top1_acc', 0)
-            # --- Adaptive LR ---
-            lr_adj = lr_sched.step(val_acc)
-            if lr_adj:
-                print(f"Learning rate reduced to {lr_sched.get_lr():.3e}")
-            # --- G_IL ---
-            g_il = None
-            if full_model_acc is not None:
-                g_il = (val_acc - full_model_acc) / (1 - full_model_acc)
-            print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}")
-            print(f"Validation Accuracy: {val_acc:.4f}")
-            if g_il is not None:
-                print(f"Incremental Learning Gap (G_IL): {g_il:.4f}")
-            print(f"Checkpoint saved to {os.path.join(checkpoint_dir, f'step_{step}_class_{class_order[step]}.pth')}\n")
-            if val_acc > best_acc:
-                best_acc = val_acc
-                best_model_path = os.path.join(checkpoint_dir, f"best_model_step_{step}_class_{class_order[step]}.pth")
-                save_checkpoint(model, optimizer, epoch+1, best_model_path)
 
-        if exemplar_mgr:
-            exemplar_mgr.set_feature_extractor(model)
-            exemplar_mgr.update(train_loader.dataset, class_order[step], model)
-
-    # Save final model
-    save_checkpoint(model, optimizer, num_epochs, os.path.join(checkpoint_dir, "final_model.pth"))
-    print("Incremental Learning with EVM completed successfully!")
-
-    # --- TESTING ON BEST MODEL ---
-    if best_model_path is not None and test_loader is not None:
-        print("\n=== Testing Best Model on Test Set ===")
-        # Rebuild model with all classes
+    # --------- FINAL EVALUATION ---------
+    if final_global_best_path:
+        print("\n= Final Evaluation: GLOBAL BEST MODEL on Full Datasets =")
         if model_name == "docformer":
             cfg = DocFormerConfig()
-            nc = len(class_order)
-            model = DocFormer(cfg, num_classes=nc).to(cfg.device)
+            final_model = DocFormer(cfg, num_classes=len(all_classes)).to(cfg.device)
         else:
-            nc = len(class_order)
-            model = EAMLModel(num_classes=nc).to(DEVICE)
-        checkpoint = torch.load(best_model_path, map_location=DEVICE)
-        state = checkpoint.get("model_state_dict", checkpoint)
-        model.load_state_dict(state)
-        model.eval()
-        # Use a fresh metrics object for test
-        test_metrics = CILMetrics(class_order)
-        test_results = evaluate(model, test_loader, DEVICE, test_metrics,full_model_acc, evm=evm, use_evm=True)
-        test_acc = test_results.get('top1_acc', 0)
-        g_il_test = None
-        if full_model_acc is not None:
-            g_il_test = (test_acc - full_model_acc) / (1 - full_model_acc)
-        print(f"\nTest Accuracy: {test_acc:.4f}")
-        if g_il_test is not None:
-            print(f"Test Incremental Learning Gap (G_IL): {g_il_test:.4f}")
-        print("=== End of Test Evaluation ===")
+            final_model = EAMLModel(num_classes=len(all_classes)).to(DEVICE)
+        checkpoint = torch.load(final_global_best_path, map_location=DEVICE)
+        final_model.load_state_dict(checkpoint.get("model_state_dict", checkpoint), strict=False)
+        del checkpoint
+        torch.cuda.empty_cache()
+        final_model.eval()
+        train_loader_full = get_class_il_loader(model_name, os.path.join(data_root, "train"),
+                                               all_classes, batch_size, ocr_data=ocr_tensor_path)
+        val_loader_full = get_class_il_loader(model_name, os.path.join(data_root, "val"),
+                                             all_classes, batch_size, ocr_data=ocr_tensor_path)
+        test_loader_full = get_class_il_loader(model_name, os.path.join(data_root, "test"),
+                                              all_classes, batch_size, ocr_data=ocr_tensor_path)
+        def evaluate_with_metrics(split_name, loader):
+            eval_metrics_eval = CILMetrics(class_names=all_classes.copy())
+            results = evaluate(final_model, loader, DEVICE, eval_metrics_eval, full_model_acc)
+            loss, acc = results.get('loss', 0), results.get('top1_acc', 0)
+            preds, labels = results.get('preds', []), results.get('labels', [])
+            p = precision_score(labels, preds, average='macro', zero_division=0) if len(labels) > 0 else 0
+            r = recall_score(labels, preds, average='macro', zero_division=0) if len(labels) > 0 else 0
+            f1 = f1_score(labels, preds, average='macro', zero_division=0) if len(labels) > 0 else 0
+            gil = (acc - full_model_acc) / (1 - full_model_acc) if full_model_acc is not None else None
+            print(f"{split_name} - Loss: {loss:.4f} | Acc: {acc:.4f} | Prec: {p:.4f} | Recall: {r:.4f} | F1: {f1:.4f}")
+            if gil is not None:
+                print(f"{split_name} - Incremental Learning Gap (G_IL): {gil:.4f}")
+            if split_name == "Test":
+                class_wise_acc = results.get('class_acc', None)
+                if class_wise_acc is not None:
+                    print("\nClass-wise Test Accuracy:")
+                    for clss, cacc in zip(all_classes, class_wise_acc):
+                        print(f"  {clss}: {cacc:.4f}")
+            torch.cuda.empty_cache()
+        evaluate_with_metrics("Train", train_loader_full)
+        evaluate_with_metrics("Validation", val_loader_full)
+        evaluate_with_metrics("Test", test_loader_full)
+
+        # --- EVM open set test evaluation ---
+        test_features_dict = extract_features(final_model, test_loader_full, DEVICE)
+        os_result = evm_openset_metrics(evm, test_features_dict, known_classes=all_classes)
+        print(f"[EVM Open Set Test] Known acc: {os_result['open_set_accuracy']:.4f}, Unknown rejection: {os_result['unknown_rejection']:.4f}")
+
+        # Visualization
+        savepath = os.path.join(checkpoint_dir,"evm_hist.png")
+        if os_result.get("y_true") is not None and os_result.get("scores") is not None:
+            plot_openset_histograms(os_result['y_true'], os_result['y_pred'], os_result['scores'], savepath=savepath)
 
 if __name__ == "__main__":
     import argparse
     p = argparse.ArgumentParser()
     p.add_argument('--data_dir', required=True)
-    p.add_argument('--ocr_tensor_path', type=str, required=True,help="Path to JSON file with pre-extracted OCR text")
-    p.add_argument('--class_order', required=True, help="Comma-separated class order")
+    p.add_argument('--ocr_tensor_path', required=True)
+    p.add_argument('--all_classes', required=True)
+    p.add_argument('--base_classes', required=True)
     p.add_argument('--base_model_path', required=True)
-    p.add_argument('--model_name', required=True, choices=['eaml', 'docformer'])
+    p.add_argument('--model_name', choices=['eaml', 'docformer'], required=True)
     p.add_argument('--checkpoint_dir', required=True)
-    p.add_argument('--start_step', type=int, default=0)
     p.add_argument('--batch_size', type=int, default=8)
     p.add_argument('--lr', type=float, default=2e-5)
     p.add_argument('--num_epochs', type=int, default=10)
@@ -222,36 +383,46 @@ if __name__ == "__main__":
     p.add_argument('--exemplar_selection', choices=['random','herding'], default='herding')
     p.add_argument('--training_mode', choices=['full','last_layer','selective'], default='last_layer')
     p.add_argument('--trainable_layers', nargs='+', default=None)
-    p.add_argument('--resume_checkpoint', type=str, default=None, help="Path to checkpoint for resuming training")
+    p.add_argument('--resume', action='store_true')
+    p.add_argument('--resume_checkpoint', type=str, default=None)
+    p.add_argument('--global_best_acc', type=float, default=0.0)
+    p.add_argument('--full_model_acc', type=float, default=None)
+    p.add_argument('--weight_decay', type=float, default=0.01)
+    p.add_argument('--patience', type=int, default=10)
+    p.add_argument('--use_balanced_sampler', action='store_true')
+    p.add_argument('--use_bias_correction', action='store_true')
     p.add_argument('--evm_tailsize', type=float, default=0.5)
     p.add_argument('--evm_threshold', type=float, default=0.7)
-    p.add_argument('--full_model_acc', type=float, default=None)
-    p.add_argument('--weight_decay', type=float, default=1e-4)
     args = p.parse_args()
     run_incremental_learning_evm(
         data_root=args.data_dir,
         ocr_tensor_path=args.ocr_tensor_path,
-        class_order=args.class_order.split(','),
+        all_classes=args.all_classes.split(','),
+        base_classes=args.base_classes.split(','),
         base_model_path=args.base_model_path,
         model_name=args.model_name,
         checkpoint_dir=args.checkpoint_dir,
-        start_step=args.start_step,
         batch_size=args.batch_size,
         lr=args.lr,
         num_epochs=args.num_epochs,
         strategy=args.strategy,
         temperature=args.temperature,
         lambda_distill=args.lambda_distill,
-        use_ewc=args.use_ewc,
         lambda_ewc=args.lambda_ewc,
+        use_ewc=args.use_ewc,
         use_exemplars=args.use_exemplars,
         max_exemplars=args.max_exemplars,
         exemplar_selection=args.exemplar_selection,
         training_mode=args.training_mode,
         trainable_layers=args.trainable_layers,
+        resume=args.resume,
         resume_checkpoint=args.resume_checkpoint,
-        evm_tailsize=args.evm_tailsize,
-        evm_threshold=args.evm_threshold,
+        global_best_acc=args.global_best_acc,
         full_model_acc=args.full_model_acc,
-        weight_decay=args.weight_decay
+        weight_decay=args.weight_decay,
+        patience=args.patience,
+        use_balanced_sampler=args.use_balanced_sampler,
+        use_bias_correction=args.use_bias_correction,
+        evm_tailsize=args.evm_tailsize,
+        evm_threshold=args.evm_threshold
     )
