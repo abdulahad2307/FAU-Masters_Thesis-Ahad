@@ -32,9 +32,10 @@ class ExemplarManager:
         if len(class_samples) <= self.max_per_class:
             return class_samples
         return random.sample(class_samples, self.max_per_class)
-
+    
+    """
     def _select_herding(self, dataset, class_name, model):
-        """Select exemplars using herding (closest to class mean)."""
+        #Select exemplars using herding (closest to class mean).
         class_samples = [s for s in dataset.samples if s[2] == class_name]
         if len(class_samples) <= self.max_per_class:
             return class_samples
@@ -80,8 +81,87 @@ class ExemplarManager:
             selected_indices.append(idx)
             selected_features.append(features[idx])
         return [labels[i] for i in selected_indices]
+    """
 
-    def _balance_exemplar_set(self):
+    def _select_herding(self, dataset, class_name, model):
+        """Select exemplars using herding (closest to class mean), robust to extraction failures."""
+        import warnings
+        from PIL import Image
+
+        class_samples = [s for s in dataset.samples if s[2] == class_name]
+        if len(class_samples) == 0:
+            warnings.warn(f"No samples found for class {class_name}. Returning empty exemplar set.")
+            return []
+        if len(class_samples) <= self.max_per_class:
+            return class_samples
+
+        features = []
+        valid_labels = []
+        model.eval()
+        device = next(model.parameters()).device
+
+        with torch.no_grad():
+            for idx, sample in enumerate(class_samples):
+                try:
+                    img_path, tokens, _ = sample
+                    if tokens is None or not isinstance(tokens, dict):
+                        warnings.warn(f"Skipping sample with missing tokens at idx {idx}: {img_path}")
+                        continue
+                    image = dataset.transform(Image.open(img_path).convert("RGB")).unsqueeze(0).to(device)
+                    if hasattr(model, 'extract_features'):
+                        feature = model.extract_features(
+                            images=image,
+                            texts={
+                                'input_ids': tokens['input_ids'].unsqueeze(0).to(device),
+                                'attention_mask': tokens['attention_mask'].unsqueeze(0).to(device)
+                            }
+                        )
+                    else:
+                        feature = model(image)
+                    feature_np = feature.cpu().numpy().flatten()
+                    features.append(feature_np)
+                    valid_labels.append(sample)
+                except Exception as e:
+                    warnings.warn(f"Skipping sample at idx {idx} ({img_path}): {e}")
+                    continue
+
+        features = np.array(features)
+        if len(features) == 0:
+            warnings.warn(f"No features were extracted for class {class_name}. Returning empty exemplars.")
+            return []
+
+        class_mean = np.mean(features, axis=0)
+        selected_indices = []
+        selected_features = []
+
+        pick_n = min(self.max_per_class, len(features))
+        for _ in range(pick_n):
+            # Always select indices relative to the COMPACTED features array
+            candidate_indices = [i for i in range(len(features)) if i not in selected_indices]
+            if not candidate_indices:
+                break
+            if len(selected_features) == 0:
+                distances = np.linalg.norm(features[candidate_indices] - class_mean, axis=1)
+                select_offset = np.argmin(distances)
+                idx = candidate_indices[select_offset]
+            else:
+                current_mean = np.mean(np.array(selected_features), axis=0)
+                candidate_means = np.array([
+                    (current_mean * len(selected_features) + features[i]) / (len(selected_features) + 1)
+                    for i in candidate_indices
+                ])
+                distances = np.linalg.norm(candidate_means - class_mean, axis=1)
+                select_offset = np.argmin(distances)
+                idx = candidate_indices[select_offset]
+            selected_indices.append(idx)
+            selected_features.append(features[idx])
+
+        # Validate indices are within the correct range for valid_labels/features
+        return [valid_labels[i] for i in selected_indices]
+
+
+
+    def _balance_exemplar_set(self):    
         """Balance exemplar set to ensure fair representation of all classes."""
         total_exemplars = sum(len(exems) for exems in self.exemplars.values())
         if total_exemplars <= self.max_exemplars:

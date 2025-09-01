@@ -83,7 +83,9 @@ class EAMLClassILDataset(Dataset):
                     if self.ocr_tokenized:
                         tokens = {
                             "input_ids": torch.tensor(ocr_entry["input_ids"]),
+                            #"input_ids": ocr_entry["input_ids"].detach().clone(), <== use this for EVM +OOD
                             "attention_mask": torch.tensor(ocr_entry["attention_mask"])
+                            #"attention_mask": ocr_entry["attention_mask"].detach().clone(), <== use this for EVM +OOD to ensures a safe copy of the tensor without gradient tracking.
                         }
                     else:
                         text = ocr_entry
@@ -208,7 +210,7 @@ def get_class_il_loader(
     current_classes: List[str],
     batch_size: int = 32,
     num_workers: int = 4,
-    ocr_data: Optional[Dict] = None  # Add OCR data parameter
+    ocr_data: Optional[Dict] = None
 ) -> DataLoader:
     """Get dataloader for class incremental learning
     Args:
@@ -251,3 +253,37 @@ def get_class_il_loader(
         )
     else:
         raise ValueError(f"Unsupported model type: {model_type}")
+
+
+def get_class_loader_for_class(class_name: str, dataset, batch_size: int, device, ocr_tensor_path):
+    """
+    Returns a DataLoader that loads only samples belonging to the specified class.
+    
+    Args:
+        class_name (str): The class to filter.
+        dataset (torch.utils.data.Dataset): The full dataset.
+        batch_size (int): Batch size for DataLoader.
+        device: Computation device (for reference).
+        ocr_tensor_path (str): Path for OCR data as needed by dataset.
+    
+    Returns:
+        DataLoader: DataLoader yielding only samples of class `class_name`.
+    """
+    from torch.utils.data import Subset, DataLoader
+
+    # Finding indices of samples belonging to class_name
+    indices = [idx for idx, sample in enumerate(dataset.samples)
+               if sample[2] == class_name]  # Adjust if class label is at a different index
+    
+    # Creating subset of dataset with only those indices
+    subset = Subset(dataset, indices)
+    
+    # Creating DataLoader; use your standard collate_fn if needed
+    loader = DataLoader(
+        subset,
+        batch_size=batch_size,
+        shuffle=False,  # no shuffle for feature extraction
+        num_workers=2,
+        collate_fn=dataset.collate_fn if hasattr(dataset, 'collate_fn') else None
+    )
+    return loader

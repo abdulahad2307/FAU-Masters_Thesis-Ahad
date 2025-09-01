@@ -123,7 +123,7 @@ def save_checkpoint(model, optimizer, epoch, path, extra_data=None):
     state = {
         'epoch': epoch,
         'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict() if optimizer else None,
     }
     if extra_data is not None:
         state.update(extra_data)
@@ -146,17 +146,18 @@ def load_checkpoint(model, optimizer, path, device, metrics=None):
     if not os.path.exists(path):
         print(f"No checkpoint found at {path}")
         return 0
-    checkpoint = torch.load(path, map_location=device)
+    checkpoint = torch.load(path, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-    if optimizer is not None and 'optimizer_state_dict' in checkpoint:
+    if optimizer is not None and 'optimizer_state_dict' in checkpoint and checkpoint['optimizer_state_dict'] is not None:
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     if metrics is not None and 'metrics_state' in checkpoint:
         metrics.load_state_dict(checkpoint['metrics_state'])
         print(f"Restored metrics state from checkpoint with {metrics.num_classes} classes")
     print(f"Loaded checkpoint from {path} (epoch {checkpoint['epoch']})")
-    return checkpoint['epoch']
+    #return checkpoint['epoch']
+    return checkpoint
 
-
+"""
 def train_one_epoch_cil(model, dataloader, optimizer, criterion, device, metrics):
     model.train()
     total_loss = 0
@@ -217,6 +218,81 @@ def train_one_epoch_cil(model, dataloader, optimizer, criterion, device, metrics
     print(f"Precision: {prec:.4f} | Recall: {rec:.4f} | F1: {f1:.4f}")
 
     return metric_dict
+"""
+
+def train_one_epoch_cil_v2(
+    model,
+    dataloader,
+    optimizer,
+    criterion,
+    device,
+    metrics,
+    inc_strategy,
+    old_model=None,
+    ewc=None
+):
+    model.train()
+    total_loss = 0
+    all_preds = []
+    all_labels = []
+    
+    for batch in tqdm(dataloader):
+        optimizer.zero_grad()
+        
+        if "images" in batch:
+            images = batch["images"].to(device)
+            input_ids = batch["texts"]["input_ids"].to(device)
+            attention_mask = batch["texts"]["attention_mask"].to(device)
+            labels = batch["labels"].to(device)
+            outputs = model(images=images, input_ids=input_ids, attention_mask=attention_mask)
+            logits = outputs["logits"] if isinstance(outputs, dict) else outputs
+            features = model.extract_features(images=images, input_ids=input_ids, attention_mask=attention_mask, texts=batch["texts"])
+        else:
+            inputs = {
+                "pixel_values": batch["pixel_values"].to(device),
+                "input_ids": batch["input_ids"].to(device),
+                "attention_mask": batch["attention_mask"].to(device),
+                "bboxes": batch["bboxes"].to(device)
+            }
+            labels = batch["labels"].to(device)
+            outputs = model(**inputs, task="classification")
+            logits = outputs["logits"]
+            features = model.extract_features(**inputs)
+        
+        sup_loss = criterion(logits, labels)
+        
+        inc_loss, preds, target_labels = inc_strategy.compute_loss(
+            model, batch, criterion, old_model=old_model, ewc=ewc
+        )
+        
+        loss = sup_loss + inc_loss
+        
+        loss.backward()
+        optimizer.step()
+        
+        all_preds.extend(preds.detach().cpu().tolist())
+        all_labels.extend(target_labels.detach().cpu().tolist())
+        metrics.update(np.array(all_preds), np.array(all_labels))
+        total_loss += loss.item()
+        
+    avg_loss = total_loss / len(dataloader)
+    metric_vals = metrics.get_metrics()
+    acc = metric_vals.get("top1_acc", 0)
+
+    precision = precision_score(all_labels, all_preds, average='macro', zero_division=0)
+    recall = recall_score(all_labels, all_preds, average='macro', zero_division=0)
+    f1 = f1_score(all_labels, all_preds, average='macro', zero_division=0)
+    
+    print(f"Train Loss: {avg_loss:.4f} | Accuracy: {acc:.4f} | Precision: {precision:.4f} | Recall: {recall:.4f} | F1: {f1:.4f}")
+    
+    return {
+        "loss": avg_loss,
+        "top1_acc": acc,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1
+    }
+
 
 def train_one_epoch_cil(
         model,
@@ -236,11 +312,11 @@ def train_one_epoch_cil(
 
     for batch in tqdm(dataloader):
         optimizer.zero_grad()
-        # Have to use strategy-specific loss (handles distillation, EWC, etc)
+        # Have to use strategy-specific loss here (handles distillation, EWC, etc)
         loss, preds, labels = inc_strategy.compute_loss(
             model, batch, criterion, old_model=old_model, ewc=ewc
         )
-        print(f"Batch total loss: {loss.item()}")
+        #print(f"Batch total loss: {loss.item()}")
         loss.backward()
         optimizer.step()
 
@@ -270,6 +346,85 @@ def train_one_epoch_cil(
     print(f"Precision: {prec:.4f} | Recall: {rec:.4f} | F1: {f1:.4f}")
 
     return metric_dict
+# ---- For EVM integrated training ----- #
+def train_one_epoch_cil_with_evm(
+    model,
+    dataloader,
+    optimizer,
+    criterion,
+    device,
+    metrics,
+    inc_strategy,
+    evm=None,
+    lambda_evm=0.1,
+    old_model=None,
+    ewc=None
+):
+    model.train()
+    total_loss = 0
+    all_preds = []
+    all_labels = []
+
+    for batch in tqdm(dataloader):
+        optimizer.zero_grad()
+
+        if "images" in batch:
+            images = batch["images"].to(device)
+            texts = batch["texts"]
+            input_ids = batch["texts"]["input_ids"].to(device)
+            attention_mask = batch["texts"]["attention_mask"].to(device)
+            labels = batch["labels"].to(device)
+            outputs = model(images=images, input_ids=input_ids, attention_mask=attention_mask)
+            logits = outputs["logits"] if isinstance(outputs, dict) else outputs
+            features = model.extract_features(images=images, input_ids=input_ids, attention_mask=attention_mask,texts=texts)
+        else:
+            inputs = {
+                "pixel_values": batch["pixel_values"].to(device),
+                "input_ids": batch["input_ids"].to(device),
+                "attention_mask": batch["attention_mask"].to(device),
+                "bboxes": batch["bboxes"].to(device)
+            }
+            labels = batch["labels"].to(device)
+            texts = batch["texts"]
+            outputs = model(**inputs, task="classification")
+            logits = outputs["logits"]
+            features = model.extract_features(**inputs)
+
+        loss = criterion(logits, labels)
+
+        if evm is not None and evm.initialized:
+            evm_probs = evm.predict_proba_tensor(features)  # returns cpu tensor
+            batch_indices = torch.arange(labels.size(0))
+            true_class_probs = evm_probs[batch_indices, labels.cpu()]
+            evm_loss = -torch.log(true_class_probs + 1e-8).mean()
+            loss = loss + lambda_evm * evm_loss
+
+        if inc_strategy:
+            inc_loss, preds, target_labels = inc_strategy.compute_loss(
+                model, batch, criterion, old_model=old_model, ewc=ewc
+            )
+            loss = loss + inc_loss if evm is None else loss + inc_loss
+            preds = preds
+            target_labels = target_labels
+        else:
+            preds = torch.argmax(logits, dim=1)
+            target_labels = labels
+
+        loss.backward()
+        optimizer.step()
+
+        all_preds.extend(preds.detach().cpu().tolist())
+        all_labels.extend(target_labels.detach().cpu().tolist())
+        metrics.update(np.array(all_preds), np.array(all_labels))
+        total_loss += loss.item()
+
+    avg_loss = total_loss / len(dataloader)
+    acc = metrics.get_metrics().get("top1_acc", 0)
+
+    print(f"Train Loss: {avg_loss:.4f} | Accuracy: {acc:.4f}")
+
+    return {"loss": avg_loss, "accuracy": acc}
+
 
 
 def evaluate(model, dataloader, device, metrics, full_acc=None, evm=None, use_evm=False):

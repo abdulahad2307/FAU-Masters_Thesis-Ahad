@@ -32,6 +32,7 @@ def run_incremental_learning_evm(
     ocr_tensor_path: str,
     all_classes: List[str],
     base_classes: List[str],
+    unseen_classes: List[str],
     base_model_path: str,
     model_name: str,
     checkpoint_dir: str,
@@ -55,7 +56,7 @@ def run_incremental_learning_evm(
     full_model_acc: Optional[float] = None,
     patience: int = 10,
     use_balanced_sampler: bool = True,
-    use_bias_correction: bool = False,
+    use_bias_correction: bool = True,
     evm_tailsize: float = 0.5,
     evm_threshold: float = 0.7
 ):
@@ -73,29 +74,52 @@ def run_incremental_learning_evm(
         selection_strategy=exemplar_selection
     ) if use_exemplars else None
 
-    unseen_classes = get_unseen_classes(base_classes, all_classes)
-    current_classes = base_classes.copy()
+    if unseen_classes is None or len(unseen_classes) == 0:
+        raise ValueError("You must provide a non-empty list of unseen_classes")
+    for cls in unseen_classes:
+        if cls not in all_classes:
+            raise ValueError(f"Unseen class '{cls}' is not in all_classes list")
+        if cls in base_classes:
+            raise ValueError(f"Unseen class '{cls}' is already in base_classes")
+
     print(f"Base classes: {base_classes}")
+    current_classes = base_classes.copy()
     start_unseen_index = 0
     final_global_best_path = None
     ewc = None
-    evm = EVMClassifier(tailsize=evm_tailsize, cover_threshold=evm_threshold)  # EVM setup
+    evm = EVMClassifier(tailsize=evm_tailsize, cover_threshold=evm_threshold)
     model = None
 
+    start_epoch = 0
+    epochs_no_improve = 0
+    step_best_acc = 0.0
+    step_best_path = None
+
     if resume and resume_checkpoint and os.path.exists(resume_checkpoint):
-        checkpoint = torch.load(resume_checkpoint, map_location=DEVICE)
+        checkpoint = torch.load(resume_checkpoint, map_location=DEVICE, weights_only=False)
         current_classes = checkpoint.get("current_classes", base_classes.copy())
         start_unseen_index = checkpoint.get("unseen_index", 0)
+        start_epoch = checkpoint.get("epoch", 0)
+        epochs_no_improve = checkpoint.get("epochs_no_improve", 0)
+        step_best_acc = checkpoint.get("step_best_acc", 0.0)
+        step_best_path = checkpoint.get("step_best_path", None)
         print(f"Current classes restored: {current_classes}")
-        print(f"Will resume at unseen index: {start_unseen_index}")
+        print(f"Will resume at unseen index: {start_unseen_index}, epoch: {start_epoch}")
         del checkpoint
         torch.cuda.empty_cache()
 
     base_model_acc = full_model_acc
 
     for unseen_idx, new_class in enumerate(unseen_classes[start_unseen_index:], start=start_unseen_index):
+        if unseen_idx > start_unseen_index:
+            start_epoch = 0
+            epochs_no_improve = 0
+            step_best_acc = 0.0
+            step_best_path = None
+
         previous_classes = current_classes.copy()
-        current_classes.append(new_class)
+        if new_class not in current_classes:
+            current_classes.append(new_class)
         print(f"\n= Incremental Step ({unseen_idx+1}/{len(unseen_classes)}) - Adding class: {new_class} =")
 
         replay_samples = []
@@ -115,23 +139,16 @@ def run_incremental_learning_evm(
             if use_exemplars and replay_samples:
                 new_data_samples = [s for s in train_dataset.samples if s[2] == new_class]
                 for i, s in enumerate(replay_samples + new_data_samples):
-                    assert isinstance(s, tuple) and len(s) == 3 and isinstance(s, str), \
+                    assert isinstance(s, tuple) and len(s) == 3 and isinstance(s[2], str), \
                         f"Sample at position {i} is not correct tuple: {type(s)}, {getattr(s, 'keys', lambda: None)() if isinstance(s, dict) else s}"
                 train_dataset.samples = replay_samples + new_data_samples
                 print(f"Using {len(replay_samples)} exemplars and {len(new_data_samples)} new samples for training.")
-            
-            # -------- BALANCED SAMPLER --------
             if use_balanced_sampler:
                 from collections import Counter
-                #sample = train_dataset.samples[0]
-                #print("Sample length:", len(sample))
-                #for i, elem in enumerate(sample):
-                #    print(f"Index {i}: type={type(elem)} - preview: {str(elem)[:100]}")
                 class_counts = Counter([s[2] for s in train_dataset.samples])
                 total = sum(class_counts.values())
                 class_weights = {cls: total/count for cls, count in class_counts.items()}
                 sample_weights = [class_weights[s[2]] for s in train_dataset.samples]
-
                 sampler = WeightedRandomSampler(sample_weights, len(sample_weights), replacement=True)
                 train_loader = DataLoader(
                     train_dataset,
@@ -163,13 +180,20 @@ def run_incremental_learning_evm(
         else:
             model = EAMLModel(num_classes=len(current_classes)).to(DEVICE)
 
-        if resume and resume_checkpoint:
-            load_checkpoint(model, None, resume_checkpoint, DEVICE)
-            resume_checkpoint = None
-            resume = False
-        else:
+        #per-increment resume support
+        this_start_epoch = start_epoch if unseen_idx == start_unseen_index else 0
+        this_epochs_no_improve = epochs_no_improve if unseen_idx == start_unseen_index else 0
+        this_step_best_acc = step_best_acc if unseen_idx == start_unseen_index else 0.0
+        this_step_best_path = step_best_path if unseen_idx == start_unseen_index else None
+
+        if resume and resume_checkpoint and os.path.exists(resume_checkpoint) and unseen_idx == start_unseen_index:
+            checkpoint = load_checkpoint(model, None, resume_checkpoint, DEVICE)
+            del checkpoint
+            torch.cuda.empty_cache()
+
+        if resume_checkpoint is None or not os.path.exists(resume_checkpoint):
             if os.path.exists(base_model_path):
-                base_ckpt = torch.load(base_model_path, map_location=DEVICE)
+                base_ckpt = torch.load(base_model_path, map_location=DEVICE,weights_only=False)
                 state = base_ckpt.get("model_state_dict", base_ckpt)
                 own = model.state_dict()
                 for k, v in state.items():
@@ -185,10 +209,10 @@ def run_incremental_learning_evm(
                 old_model = DocFormer(cfg, num_classes=len(previous_classes)).to(cfg.device)
             else:
                 old_model = EAMLModel(num_classes=len(previous_classes)).to(DEVICE)
-            if 'step_best_path' in locals() and step_best_path and os.path.exists(step_best_path):
-                prev_ckpt = torch.load(step_best_path, map_location=DEVICE)
+            if this_step_best_path and os.path.exists(this_step_best_path):
+                prev_ckpt = torch.load(this_step_best_path, map_location=DEVICE,weights_only=False)
             elif os.path.exists(base_model_path):
-                prev_ckpt = torch.load(base_model_path, map_location=DEVICE)
+                prev_ckpt = torch.load(base_model_path, map_location=DEVICE,weights_only=False)
             else:
                 prev_ckpt = None
             if prev_ckpt is not None:
@@ -206,14 +230,16 @@ def run_incremental_learning_evm(
             lr=lr,
             weight_decay=weight_decay
         )
+        if resume_checkpoint and os.path.exists(resume_checkpoint) and unseen_idx == start_unseen_index:
+            checkpoint = torch.load(resume_checkpoint, map_location=DEVICE,weights_only=False)
+            if 'optimizer_state_dict' in checkpoint:
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            del checkpoint
+            torch.cuda.empty_cache()
         lr_sched = AdaptiveLR(optimizer, base_lr=lr)
         criterion = nn.CrossEntropyLoss()
-        step_best_acc = 0.0
-        step_best_path = None
-        epochs_no_improve = 0
-
         # ----------- TRAINING -----------
-        for epoch in range(num_epochs):
+        for epoch in range(this_start_epoch, num_epochs):
             print(f"\n= Epoch {epoch+1}/{num_epochs} for Class {new_class} =")
             train_metrics = CILMetrics(current_classes)
             train_result = train_one_epoch_cil(
@@ -231,35 +257,56 @@ def run_incremental_learning_evm(
             val_result = evaluate(model, val_loader, DEVICE, val_metrics, None)
             print(f"Train Loss: {train_result['loss']:.4f} | Train Acc: {train_result['top1_acc']:.4f}")
             print(f"Val Loss: {val_result['loss']:.4f} | Val Acc: {val_result['top1_acc']:.4f}")
-            if val_result['top1_acc'] > step_best_acc:
-                step_best_acc = val_result['top1_acc']
-                epochs_no_improve = 0
-                step_best_path = os.path.join(checkpoint_dir, f"best_step_class_{new_class}.pth")
-                save_checkpoint(model, optimizer, epoch+1, step_best_path,
-                                extra_data={
-                                    "current_classes": current_classes,
-                                    "unseen_index": unseen_idx + 1
-                                })
+
+            last_epoch_path = os.path.join(checkpoint_dir, f"epoch{epoch+1}_{new_class}.pth")
+            best_model_path = os.path.join(checkpoint_dir, f"best_model_{new_class}.pth")
+
+            if val_result['top1_acc'] > this_step_best_acc:
+                this_step_best_acc = val_result['top1_acc']
+                this_epochs_no_improve = 0
+                this_step_best_path = best_model_path
+                save_checkpoint(model, optimizer, epoch + 1, best_model_path,
+                    extra_data={
+                        "current_classes": current_classes,
+                        "unseen_index": unseen_idx,
+                        "unseen_class": new_class,
+                        "epoch": epoch + 1,
+                        "epochs_no_improve": this_epochs_no_improve,
+                        "step_best_acc": this_step_best_acc,
+                        "step_best_path": best_model_path
+                    }
+                )
                 test_metrics = CILMetrics(current_classes)
                 test_result = evaluate(model, test_loader, DEVICE, test_metrics, full_model_acc)
                 print("Class-wise Test Accuracy:")
                 for cls, acc in zip(current_classes, test_result['class_acc']):
                     print(f"  {cls}: {acc:.4f}")
                 if full_model_acc is not None:
-                    gil = (test_result['top1_acc'] - full_model_acc) / (1 - full_model_acc)
+                    gil_base = 0.953 ## EAML base
+                    gil = (test_result['top1_acc'] - gil_base) / (1 - gil_base)
                     print(f"GIL (wrt base): {gil:.4f}")
                 # -------- EVM ---------
                 if use_exemplars and evm.initialized:
                     print("Running EVM open set evaluation on validation set...")
-                    # Extract features for val set
                     val_features_dict = extract_features(model, val_loader, DEVICE)
                     os_result = evm_openset_metrics(evm, val_features_dict, known_classes=current_classes)
                     print(f"[EVM Open Set Val] Known acc: {os_result['open_set_accuracy']:.4f}, Unknown rejection: {os_result['unknown_rejection']:.4f}")
 
             else:
-                epochs_no_improve += 1
-                print(f"Patience counter: {epochs_no_improve}/{patience}")
-                if epochs_no_improve >= patience:
+                this_epochs_no_improve += 1
+                print(f"Patience counter: {this_epochs_no_improve}/{patience}")
+                save_checkpoint(model, optimizer, epoch + 1, last_epoch_path,
+                    extra_data={
+                        "current_classes": current_classes,
+                        "unseen_index": unseen_idx,
+                        "unseen_class": new_class,
+                        "epoch": epoch + 1,
+                        "epochs_no_improve": this_epochs_no_improve,
+                        "step_best_acc": this_step_best_acc,
+                        "step_best_path": this_step_best_path
+                    }
+                )
+                if this_epochs_no_improve >= patience:
                     print(f"Early stopping at epoch {epoch+1} due to no improvement in val accuracy for {patience} epochs.")
                     break
             lr_sched.step(val_result['top1_acc'])
@@ -274,7 +321,6 @@ def run_incremental_learning_evm(
             exemplar_mgr.update(train_loader.dataset, new_class, model)
             for cls in exemplar_mgr.exemplars:
                 print(f"Exemplar samples for {cls}: {len(exemplar_mgr.exemplars[cls])}")
-
         # ---------- BIAS CORRECTION ----------
         if use_bias_correction:
             if hasattr(model, "fusion_classifier"):
@@ -282,33 +328,31 @@ def run_incremental_learning_evm(
                 with torch.no_grad():
                     mean_bias = model.fusion_classifier.bias.mean().item()
                     model.fusion_classifier.bias[:] -= mean_bias
-
-        # ---------- EVM UPDATE (after exemplars and before next increment) ----------
+        # ---------- EVM UPDATE ----------
         print("Extracting features for EVM fitting...")
         feature_loader = DataLoader(
             train_dataset, batch_size=32, shuffle=False, num_workers=2, collate_fn=eaml_collate_fn
         )
         features_by_class = extract_features(model, feature_loader, DEVICE)
-        del feature_loader 
+        del feature_loader
         torch.cuda.empty_cache()
         evm.fit(features_by_class)
         print("Fitted EVM for current step.")
-        # FINALIZE MODEL SELECTION FOR NEXT INCREMENT
-        if step_best_path and os.path.exists(step_best_path):
-            base_model_path = step_best_path
+        if this_step_best_path and os.path.exists(this_step_best_path):
+            base_model_path = this_step_best_path
         else:
-            print("Waaarning: No best checkpoint found for this increment. Skipping base_model_path update.")
-        if unseen_idx == len(unseen_classes) - 1:
-            if step_best_path and os.path.exists(step_best_path):
-                final_global_best_path = os.path.join(checkpoint_dir, "final_global_best_model.pth")
-                shutil.copy(step_best_path, final_global_best_path)
-                print(f"Final Global Best Model saved: {final_global_best_path}")
-                torch.cuda.empty_cache()
-            else:
-                print("Warning: No best checkpoint found for the last incremental step. Not saving final global best model.")
+            print("Warning: No best checkpoint found for this increment. Skipping base_model_path update.")
 
+    # After all increments
+    final_global_best_path = None
+    if this_step_best_path and os.path.exists(this_step_best_path):
+        final_global_best_path = os.path.join(checkpoint_dir, "final_global_best_model.pth")
+        shutil.copy(this_step_best_path, final_global_best_path)
+        print(f"Final Global Best Model saved: {final_global_best_path}")
+        torch.cuda.empty_cache()
+    else:
+        print("Warning: No best checkpoint found for the last incremental step. Not saving final global best model.")
 
-    # --------- FINAL EVALUATION ---------
     if final_global_best_path:
         print("\n= Final Evaluation: GLOBAL BEST MODEL on Full Datasets =")
         if model_name == "docformer":
@@ -316,7 +360,7 @@ def run_incremental_learning_evm(
             final_model = DocFormer(cfg, num_classes=len(all_classes)).to(cfg.device)
         else:
             final_model = EAMLModel(num_classes=len(all_classes)).to(DEVICE)
-        checkpoint = torch.load(final_global_best_path, map_location=DEVICE)
+        checkpoint = torch.load(final_global_best_path, map_location=DEVICE,weights_only=False)
         final_model.load_state_dict(checkpoint.get("model_state_dict", checkpoint), strict=False)
         del checkpoint
         torch.cuda.empty_cache()
@@ -367,6 +411,7 @@ if __name__ == "__main__":
     p.add_argument('--ocr_tensor_path', required=True)
     p.add_argument('--all_classes', required=True)
     p.add_argument('--base_classes', required=True)
+    p.add_argument('--unseen_classes', required=True, help="Unseen class list for this incremental step")
     p.add_argument('--base_model_path', required=True)
     p.add_argument('--model_name', choices=['eaml', 'docformer'], required=True)
     p.add_argument('--checkpoint_dir', required=True)
@@ -399,6 +444,7 @@ if __name__ == "__main__":
         ocr_tensor_path=args.ocr_tensor_path,
         all_classes=args.all_classes.split(','),
         base_classes=args.base_classes.split(','),
+        unseen_classes=args.unseen_classes.split(','),
         base_model_path=args.base_model_path,
         model_name=args.model_name,
         checkpoint_dir=args.checkpoint_dir,

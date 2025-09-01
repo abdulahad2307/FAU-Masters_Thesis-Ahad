@@ -133,9 +133,9 @@ class DistillationIncremental(IncrementalStrategy):
                     old_outputs = old_model(images=images, texts=texts)
                     old_logits = old_outputs
                 old_class_count = old_logits.size(1)
-                print(f"Student logits shape: {logits.shape}")
-                print(f"Teacher logits shape: {old_logits.shape}")
-                print(f"Old class count: {old_class_count}")
+                #print(f"Student logits shape: {logits.shape}")
+                #print(f"Teacher logits shape: {old_logits.shape}")
+                #print(f"Old class count: {old_class_count}")
                     
                 # Only applying distillation to old classes
                 old_class_count = old_logits.size(1)
@@ -209,25 +209,25 @@ class EWC:
         self.device = device
         self.lambda_ewc = lambda_ewc
         self.params = {n: p for n, p in model.named_parameters() if p.requires_grad}
-        self._means = {}  # Store parameter values
-        self._fisher = {}  # Store Fisher information matrix diagonals
+        self._means = {}  # Stores parameter values
+        self._fisher = {}  # Stores Fisher information matrix diagonals
         
-        # Compute Fisher information matrix
+        # Computing Fisher information matrix
         self._compute_fisher(dataloader)
         
-        # Store current parameter values
+        # Storing current parameter values
         for n, p in self.params.items():
             self._means[n] = p.data.clone()
     
     def _compute_fisher(self, dataloader):
         """Compute Fisher Information Matrix for parameters"""
-        # Initialize Fisher information for each parameter
+        # Initializing Fisher information for each parameter
         fisher = {n: torch.zeros_like(p) for n, p in self.params.items()}
         
-        # Set model to evaluation mode
+        # Setting model to evaluation mode
         self.model.train()
         
-        # Accumulate Fisher information
+        # Accumulating Fisher information
         samples_count = 0
         for batch in dataloader:
             samples_count += len(batch['labels'])
@@ -237,7 +237,6 @@ class EWC:
                 images = batch['images'].to(self.device)
                 texts = {k: v.to(self.device) for k, v in batch['texts'].items()}
                 labels = batch['labels'].to(self.device)
-                # Forward pass
                 outputs = self.model(images=images, texts=texts)
                 logits = outputs
             else:  # DocFormer
@@ -251,29 +250,29 @@ class EWC:
                 outputs = self.model(**inputs, task="classification")
                 logits = outputs['logits']
                 
-            # Compute log probabilities
+            #  log probabilities
             log_probs = F.log_softmax(logits, dim=1)
             
-            # Compute gradients
+            #  gradients calculations
             for i in range(len(labels)):
                 self.model.zero_grad()
-                # Select the log probability of the target class
+                # Selecting the log probability of the target class
                 log_prob = log_probs[i, labels[i]]
                 log_prob.backward(retain_graph=(i < len(labels) - 1))
                 
-                # Accumulate Fisher information
+                # Accumulating Fisher information
                 for n, p in self.params.items():
                     if p.grad is not None:
                         fisher[n] += p.grad.data ** 2
         
-        # Normalize by number of samples
+        # Normalizing by number of samples
         for n in fisher.keys():
             fisher[n] /= samples_count
             
         self._fisher = fisher
-        
+    """   
     def penalty(self, model: nn.Module) -> torch.Tensor:
-        """Compute EWC penalty for current model parameters"""
+        #Compute EWC penalty for current model parameters
         loss = 0
         for n, p in model.named_parameters():
             if n in self._means:
@@ -281,23 +280,39 @@ class EWC:
                 # weighted by Fisher information
                 loss += (self._fisher[n] * (p - self._means[n]) ** 2).sum()
         return self.lambda_ewc * loss
+    """
+        
+    def penalty(self, model: nn.Module) -> torch.Tensor:
+        """Compute EWC penalty for current model parameters, excluding classifier layers"""
+        loss = 0
+        for n, p in model.named_parameters():
+            # Skipping classifier layers that change size with new classes
+            if any(classifier_name in n for classifier_name in 
+                ['classifier', 'image_classifier', 'text_classifier', 'fusion_classifier']):
+                continue
+                
+            if n in self._means and p.size() == self._means[n].size():
+                # APplying penalty only if parameter exists and sizes match
+                loss += (self._fisher[n] * (p - self._means[n]) ** 2).sum()
+        return self.lambda_ewc * loss
+
+
     
     def update(self, new_model: nn.Module, dataloader):
         """Update EWC with a new model and dataset"""
-        # Store old values
         old_means = self._means.copy()
         old_fisher = self._fisher.copy()
         
-        # Compute new Fisher information
+        # Computing new Fisher information
         self.model = new_model
         self.params = {n: p for n, p in new_model.named_parameters() if p.requires_grad}
         self._compute_fisher(dataloader)
         
-        # Store new parameter values
+        # Storing new parameter values
         for n, p in self.params.items():
             self._means[n] = p.data.clone()
             
-        # Merge old and new Fisher information (with equal weighting)
+        # Merging old and new Fisher information (with equal weighting)
         for n in self._fisher.keys():
             if n in old_fisher:
                 self._fisher[n] = (self._fisher[n] + old_fisher[n]) / 2
@@ -325,7 +340,7 @@ class ExemplarManager:
         else:
             self.exemplars[class_name] = self._select_random(dataset, class_name)
             
-        # Reduce exemplar set if needed
+        # Reducing exemplar set if needed
         self._balance_exemplar_set()
         
     def _select_random(self, dataset, class_name):
@@ -337,64 +352,79 @@ class ExemplarManager:
         return random.sample(class_samples, self.max_per_class)
     
     def _select_herding(self, dataset, class_name, model):
-        """Select exemplars using herding (closest to class mean)"""
+        import warnings
+        from PIL import Image
+
         class_samples = [s for s in dataset.samples if s[2] == class_name]
+        if len(class_samples) == 0:
+            warnings.warn(f"No samples found for class {class_name}. Returning empty exemplar set.")
+            return []
         if len(class_samples) <= self.max_per_class:
             return class_samples
-            
-        # Extract features for all samples of this class
+
         features = []
-        labels = []
+        valid_labels = []
         model.eval()
         device = next(model.parameters()).device
+
         with torch.no_grad():
-            for sample in class_samples:
-                img_path, tokens, _ = sample
-                image = dataset.transform(Image.open(img_path).convert("RGB")).unsqueeze(0).to(device)
-                if hasattr(model, 'extract_features'):
-                    feature = model.extract_features(
-                        images=image,
-                        texts={
-                            'input_ids': tokens["input_ids"].unsqueeze(0).to(device),
-                            'attention_mask': tokens["attention_mask"].unsqueeze(0).to(device)
-                        }
-                    )
-                else:
-                    outputs = model(images=image, texts={
-                        'input_ids': tokens["input_ids"].unsqueeze(0).to(device),
-                        'attention_mask': tokens["attention_mask"].unsqueeze(0).to(device)
-                    })
-                    feature = outputs
-                features.append(feature.cpu().numpy())
-                labels.append(sample)
-        
-        # Compute class mean
+            for idx, sample in enumerate(class_samples):
+                try:
+                    img_path, tokens, _ = sample
+                    if tokens is None or not isinstance(tokens, dict):
+                        warnings.warn(f"Skipping sample with missing tokens at idx {idx}: {img_path}")
+                        continue
+                    image = dataset.transform(Image.open(img_path).convert("RGB")).unsqueeze(0).to(device)
+                    if hasattr(model, 'extract_features'):
+                        feature = model.extract_features(
+                            images=image,
+                            texts={
+                                'input_ids': tokens['input_ids'].unsqueeze(0).to(device),
+                                'attention_mask': tokens['attention_mask'].unsqueeze(0).to(device)
+                            }
+                        )
+                    else:
+                        feature = model(image)
+                    features.append(feature.cpu().numpy().flatten())
+                    valid_labels.append(sample)
+                except Exception as e:
+                    warnings.warn(f"Skipping sample at idx {idx} ({img_path}): {e}")
+                    continue
+
         features = np.array(features)
+        if len(features) == 0:
+            warnings.warn(f"No features extracted for class {class_name}. Returning empty exemplars.")
+            return []
+
         class_mean = np.mean(features, axis=0)
-        
-        # Select samples closest to the mean (herding selection)
         selected_indices = []
         selected_features = []
-        for _ in range(min(self.max_per_class, len(features))):
+
+        pick_n = min(self.max_per_class, len(features))
+
+        for _ in range(pick_n):
+            candidate_indices = [i for i in range(len(features)) if i not in selected_indices]
+            if not candidate_indices:
+                break
             if len(selected_features) == 0:
-                # Initialize with the closest sample to the mean
-                distances = np.linalg.norm(features - class_mean, axis=1)
-                idx = np.argmin(distances)
+                distances = np.linalg.norm(features[candidate_indices] - class_mean, axis=1)
+                chosen_idx_in_candidates = np.argmin(distances)
+                idx = candidate_indices[chosen_idx_in_candidates]
             else:
-                # Select the sample that makes the selected set's mean closest to the class mean
                 current_mean = np.mean(np.array(selected_features), axis=0)
                 candidate_means = np.array([
                     (current_mean * len(selected_features) + features[i]) / (len(selected_features) + 1)
-                    for i in range(len(features)) if i not in selected_indices
+                    for i in candidate_indices
                 ])
                 distances = np.linalg.norm(candidate_means - class_mean, axis=1)
-                remaining_indices = [i for i in range(len(features)) if i not in selected_indices]
-                idx = remaining_indices[np.argmin(distances)]
-                
+                chosen_idx_in_candidates = np.argmin(distances)
+                idx = candidate_indices[chosen_idx_in_candidates]
+
             selected_indices.append(idx)
             selected_features.append(features[idx])
-            
-        return [labels[i] for i in selected_indices]
+
+        return [valid_labels[i] for i in selected_indices]
+
     
     def _balance_exemplar_set(self):
         """Balance exemplar set to ensure fair representation of all classes"""
@@ -429,7 +459,7 @@ class AdaptiveLR:
         self.best_acc = 0
         self.no_improvement_count = 0
         
-        # Set initial learning rate
+        # Setting initial learning rate
         for param_group in self.optimizer.param_groups:
             param_group['lr'] = base_lr
             
@@ -442,7 +472,7 @@ class AdaptiveLR:
         else:
             self.no_improvement_count += 1
             if self.no_improvement_count >= self.patience:
-                # Reduce learning rate
+                # Reducing learning rate
                 for param_group in self.optimizer.param_groups:
                     param_group['lr'] = max(param_group['lr'] * self.decay_factor, self.min_lr)
                 self.no_improvement_count = 0
@@ -458,7 +488,7 @@ class AdaptiveLR:
         self.best_acc = 0
         self.no_improvement_count = 0
         
-        # Adjust learning rate based on task complexity
+        # Adjusting learning rate based on task complexity
         adjusted_lr = self.base_lr / (1 + task_complexity)
         for param_group in self.optimizer.param_groups:
             param_group['lr'] = adjusted_lr
@@ -481,7 +511,7 @@ def extract_features(model, dataloader, device, max_samples_per_class=None):
                 texts = {k: v.to(device) for k, v in batch['texts'].items()}
                 labels = batch['labels'].to(device)
 
-                # Prefer model.extract_features if available
+                # model.extract_features if available
                 if hasattr(model, 'extract_features'):
                     batch_features = model.extract_features(images=images, texts=texts)
                 else:
@@ -512,3 +542,73 @@ def extract_features(model, dataloader, device, max_samples_per_class=None):
 
     return features
 
+#---- OOD Feature Extraction ----
+def move_to_device(data, device):
+    if torch.is_tensor(data):
+        return data.to(device)
+    elif isinstance(data, dict):
+        return {k: move_to_device(v, device) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [move_to_device(v, device) for v in data]
+    else:
+        return data
+
+def extract_features_and_logits(model, dataloader, device):
+    model.eval()
+    features_list = []
+    logits_list = []
+    with torch.no_grad():
+        for batch in dataloader:
+            if isinstance(batch, dict):
+                inputs = {k: move_to_device(v, device) for k, v in batch.items() if k != 'labels'}
+                # Extract features
+                if hasattr(model, 'extract_features'):
+                    feats = model.extract_features(**inputs)
+                else:
+                    outs = model(**inputs)
+                    feats = outs.hidden_states[-1].mean(dim=1) if hasattr(outs, 'hidden_states') else outs
+                # Get logits
+                logits = model(**inputs)
+                if hasattr(logits, 'logits'):
+                    logits = logits.logits
+            else:
+                inputs = batch[0].to(device)
+                if hasattr(model, 'extract_features'):
+                    feats = model.extract_features(inputs)
+                else:
+                    outs = model(inputs)
+                    feats = outs.hidden_states[-1].mean(dim=1) if hasattr(outs, 'hidden_states') else outs
+                logits = model(inputs)
+                if hasattr(logits, 'logits'):
+                    logits = logits.logits
+
+            features_list.append(feats.cpu())
+            logits_list.append(logits.cpu())
+    features_all = torch.cat(features_list, dim=0)
+    logits_all = torch.cat(logits_list, dim=0)
+    return features_all, logits_all
+
+
+def extract_feature_vectors(model, dataloader, device):
+    model.eval()
+    features = []
+    with torch.no_grad():
+        for batch in dataloader:
+            if "images" in batch:
+                images = batch["images"].to(device)
+                input_ids = batch["texts"]["input_ids"].to(device)
+                attention_mask = batch["texts"]["attention_mask"].to(device)
+                feat = model.extract_features(images=images, input_ids=input_ids, attention_mask=attention_mask)
+            elif "pixel_values" in batch:
+                inputs = {
+                    "pixel_values": batch["pixel_values"].to(device),
+                    "input_ids": batch["input_ids"].to(device),
+                    "attention_mask": batch["attention_mask"].to(device),
+                    "bboxes": batch["bboxes"].to(device)
+                }
+                feat = model.extract_features(**inputs)
+            else:
+                raise KeyError("Batch missing both 'images' and 'pixel_values' keys: batch keys are {batch.keys()}")
+            features.append(feat.cpu())
+    features = torch.cat(features, dim=0)
+    return features.numpy()

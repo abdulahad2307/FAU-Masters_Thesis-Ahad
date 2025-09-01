@@ -110,9 +110,9 @@ class EAMLModel(nn.Module):
         #print("Features Shape:, image_feat.shape, text_feat.shape)
 
         # Stack along modality dimension for multi-head attention
-        fusion_input = torch.stack([image_feat, text_feat], dim=1)  
+        #fusion_input = torch.stack([image_feat, text_feat], dim=1)  
         # shape: [batch_size, 2, embed_dim]
-        fusion_module = EnhancedFusionModule(embed_dim=512, num_heads=8)
+        #fusion_module = EnhancedFusionModule(embed_dim=512, num_heads=8)
         
         # Fuse features
         fused_feat = self.fusion_module(image_feat, text_feat)
