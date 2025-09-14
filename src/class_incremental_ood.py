@@ -284,6 +284,22 @@ def run_incremental_learning_ood(
                     "step_best_acc": this_step_best_acc,
                     "step_best_path": best_model_path
                 })
+
+                save_checkpoint(
+                    model,
+                    optimizer,
+                    epoch + 1,
+                    last_epoch_path,
+                    extra_data={
+                        "current_classes": current_classes,
+                        "unseen_index": unseen_idx,
+                        "epochs_no_improve": this_epochs_no_improve,
+                        "step_best_acc": this_step_best_acc,
+                        "step_best_path": best_model_path,
+                        "epoch": epoch + 1,
+                        "unseen_class": new_class,
+                    },
+                )
                 test_metrics = CILMetrics(current_classes)
                 test_result = evaluate(model, test_loader, DEVICE, test_metrics, full_model_acc)
                 print("Class-wise Test Accuracy:")
@@ -451,7 +467,7 @@ if __name__ == "__main__":
     p.add_argument('--resume', action='store_true')
     p.add_argument('--resume_checkpoint', type=str, default=None)
     p.add_argument('--global_best_acc', type=float, default=0.0)
-    p.add_argument('--full_model_acc', type=float, default=0.9137)
+    p.add_argument('--full_model_acc', type=float, default=0.0)
     p.add_argument('--weight_decay', type=float, default=0.01)
     p.add_argument('--patience', type=int, default=10)
     p.add_argument('--use_balanced_sampler', action='store_true')

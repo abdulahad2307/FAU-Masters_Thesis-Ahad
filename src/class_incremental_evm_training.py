@@ -280,6 +280,15 @@ def run_incremental_learning_evm(
             if val_result['top1_acc'] > this_step_best_acc:
                 this_step_best_acc = val_result['top1_acc']
                 this_epochs_no_improve = 0
+                save_checkpoint(model, optimizer, epoch + 1, last_epoch_path, extra_data={
+                    "current_classes": current_classes,
+                    "unseen_index": unseen_idx,
+                    "unseen_class": new_class,
+                    "epoch": epoch + 1,
+                    "epochs_no_improve": this_epochs_no_improve,
+                    "step_best_acc": this_step_best_acc,
+                    "step_best_path": this_step_best_path
+                })
                 this_step_best_path = best_model_path
                 save_checkpoint(model, optimizer, epoch + 1, best_model_path, extra_data={
                     "current_classes": current_classes,
@@ -290,6 +299,7 @@ def run_incremental_learning_evm(
                     "step_best_acc": this_step_best_acc,
                     "step_best_path": best_model_path
                 })
+                
                 test_metrics = CILMetrics(current_classes)
                 test_result = evaluate(model, test_loader, DEVICE, test_metrics, full_model_acc)
                 print("Class-wise Test Accuracy:")
