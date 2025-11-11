@@ -1,12 +1,12 @@
 #!/bin/bash -l
 
-#SBATCH --job-name=eaml_all_class_training_tesseract          # Job name
-#SBATCH --output=logs/%x_%j.out           # Standard output log
-#SBATCH --error=logs/%x_%j.err            # Error log
+#SBATCH --job-name=eaml_11_class_training_tesseract_adamW          # Job name
+#SBATCH --output=logs/%x-15_%j.out           # Standard output log
+#SBATCH --error=logs/%x-15_%j.err            # Error log
 #SBATCH --partition=v100                  # GPU partition name
 #SBATCH --nodes=1                         # Number of nodes
 #SBATCH --ntasks=1                        # Number of tasks
-#SBATCH --cpus-per-task=1                 # Number of CPU cores per task
+#SBATCH --cpus-per-task=4                 # Number of CPU cores per task
 #SBATCH --gres=gpu:v100:1                 # Number of GPUs
 #SBATCH --time=23:59:00                   # Time limit hrs:min:sec
 #SBATCH --export=NONE                     # Avoid inheriting unwanted environment variables
@@ -32,13 +32,21 @@ ALL_CLASSES="letter,form,email,handwritten,advertisement,scientific_report,scien
 CLASSES="letter,form,email,handwritten,advertisement,scientific_report,invoice,presentation,questionnaire,resume,memo"
 
 # Create output directory
-OUTPUT_DIR="outputs/all_class_eaml_SGD_tesseract_20250807_215555"     #"outputs/all_class_eaml_SGD_tesseract_$(date +%Y%m%d_%H%M%S)"  
+#OUTPUT_DIR="/home/woody/iwi5/iwi5280h/emal_models/outputs/outputs/all_eaml_adamW_tesseract_20250914_221921" #"outputs/all_class_eaml_SGD_tesseract_20250807_215555"     #"outputs/all_class_eaml_SGD_tesseract_$(date +%Y%m%d_%H%M%S)"  
+
+## 11_class
+OUTPUT_DIR="/home/woody/iwi5/iwi5280h/emal_models/outputs/outputs/11_eaml_adamW_tesseract_20250905_004113"
+
 OCR_DATA_PATH="/home/woody/iwi5/iwi5280h/dataset/all_dataset_ocr_texts_tesseract.pt " #all_dataset_ocr_texts_trocr.pt
+
 mkdir -p $OUTPUT_DIR
 mkdir -p logs
 
 # Path to checkpoint
-CHECKPOINT_PATH="/home/hpc/iwi5/iwi5280h/projects/FAU-Masters_Thesis-Ahad/outputs/all_class_eaml_SGD_tesseract_20250807_215555/eaml_checkpoint_ep9.pt"  # Set path if resuming
+#CHECKPOINT_PATH="/home/woody/iwi5/iwi5280h/emal_models/outputs/outputs/all_eaml_adamW_tesseract_20250914_221921/eaml_checkpoint_ep9.pt"  # Set path if resuming
+
+#11_class
+CHECKPOINT_PATH="/home/woody/iwi5/iwi5280h/emal_models/outputs/outputs/11_eaml_adamW_tesseract_20250905_004113/eaml_checkpoint_ep69.pt"  # Set path if resuming
 
 # Resume from checkpoint
 RESUME_ARG=""
@@ -51,14 +59,14 @@ python src/sota_eaml_model.py \
   --data_dir /home/woody/iwi5/iwi5280h/dataset/all_prepdataset \
   --ocr_data_path $OCR_DATA_PATH \
   --output_dir $OUTPUT_DIR \
-  --num_epochs 50 \
+  --num_epochs 100 \
   --batch_size 16 \
   --learning_rate 1e-3 \
   --weight_decay 0.01 \
   --class_mapping_path $CLASS_MAPPING_PATH \
-  --classes $ALL_CLASSES \
+  --classes $CLASSES \
   --device cuda \
-  --patience 1 \
+  --patience 10 \
   --keep_checkpoints 2 \
   --cls_weight 1.0 \
   --kld_weight 0.5 \

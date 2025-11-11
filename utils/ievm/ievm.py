@@ -18,7 +18,6 @@ class IncrementalEVM:
         self.class_features = {}
         self.initialized = False
 
-
     ###################### UTILITY FUNCTIONS ######################
 
     @staticmethod
@@ -155,7 +154,7 @@ class IncrementalEVM:
         labels = [class_names[idx] if p >= threshold else "unknown"
                   for p, idx in zip(max_probs, max_indices)]
         return labels, max_probs
-        
+
     def state_dict(self):
         return {
             "tailsize": self.tailsize,
