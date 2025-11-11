@@ -1,6 +1,9 @@
 # Ignore data and logs directory
 data/
-logs/
+llmv3_logs/
+*logs/
+test_logs/
+ocr_logs/
 outputs/
 checkpoints/
 ocr_cache/
@@ -10,3 +13,7 @@ ocr_cache/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
+.ipynb*
+
+#old
+**/*_old.py
