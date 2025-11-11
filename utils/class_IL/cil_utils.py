@@ -22,7 +22,7 @@ class StandardIncremental(IncrementalStrategy):
     """Standard incremental learning without forgetting mitigation"""
     def adapt_model(self, model, old_num_classes, new_num_classes, model_name):
         """Adapt model architecture for new classes"""
-        if model_name == "docformer" and hasattr(model, 'classifier'):
+        if model_name in ["docformer", "layoutlmv3"] and hasattr(model, 'classifier'):
             # Save old classifier weights
             old_classifier = model.classifier.weight.data.clone()
             old_bias = model.classifier.bias.data.clone() if model.classifier.bias is not None else None
@@ -84,7 +84,7 @@ class StandardIncremental(IncrementalStrategy):
                 'pixel_values': batch['pixel_values'].to(self.device),
                 'input_ids': batch['input_ids'].to(self.device),
                 'attention_mask': batch['attention_mask'].to(self.device),
-                'bboxes': batch['bboxes'].to(self.device)
+                'bbox': batch['bbox'].to(self.device)
             }
             labels = batch['labels'].to(self.device)
             outputs = model(**inputs, task="classification")
@@ -162,11 +162,15 @@ class DistillationIncremental(IncrementalStrategy):
                 'pixel_values': batch['pixel_values'].to(self.device),
                 'input_ids': batch['input_ids'].to(self.device),
                 'attention_mask': batch['attention_mask'].to(self.device),
-                'bboxes': batch['bboxes'].to(self.device)
+                'bbox': batch['bbox'].to(self.device)
             }
             labels = batch['labels'].to(self.device)
-            outputs = model(**inputs, task="classification")
-            logits = outputs['logits']
+            #outputs = model(**inputs, task="classification")
+            outputs = model(**inputs)
+            if isinstance(outputs, dict):
+                logits = outputs['logits']
+            else:
+                logits = outputs
             
             # Classification loss
             cls_loss = criterion(logits, labels)
@@ -239,12 +243,12 @@ class EWC:
                 labels = batch['labels'].to(self.device)
                 outputs = self.model(images=images, texts=texts)
                 logits = outputs
-            else:  # DocFormer
+            else:  # DocFormer #LayouLMv3
                 inputs = {
                     'pixel_values': batch['pixel_values'].to(self.device),
                     'input_ids': batch['input_ids'].to(self.device),
                     'attention_mask': batch['attention_mask'].to(self.device),
-                    'bboxes': batch['bboxes'].to(self.device)
+                    'bbox': batch['bbox'].to(self.device)
                 }
                 labels = batch['labels'].to(self.device)
                 outputs = self.model(**inputs, task="classification")
@@ -523,7 +527,7 @@ def extract_features(model, dataloader, device, max_samples_per_class=None):
                     'pixel_values': batch['pixel_values'].to(device),
                     'input_ids': batch['input_ids'].to(device),
                     'attention_mask': batch['attention_mask'].to(device),
-                    'bboxes': batch['bboxes'].to(device)
+                    'bbox': batch['bbox'].to(device)
                 }
                 labels = batch['labels'].to(device)
                 outputs = model(**inputs, task="classification")
@@ -604,7 +608,7 @@ def extract_feature_vectors(model, dataloader, device):
                     "pixel_values": batch["pixel_values"].to(device),
                     "input_ids": batch["input_ids"].to(device),
                     "attention_mask": batch["attention_mask"].to(device),
-                    "bboxes": batch["bboxes"].to(device)
+                    "bbox": batch["bbox"].to(device)
                 }
                 feat = model.extract_features(**inputs)
             else:

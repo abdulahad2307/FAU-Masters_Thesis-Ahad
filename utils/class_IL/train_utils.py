@@ -252,11 +252,12 @@ def train_one_epoch_cil_v2(
                 "pixel_values": batch["pixel_values"].to(device),
                 "input_ids": batch["input_ids"].to(device),
                 "attention_mask": batch["attention_mask"].to(device),
-                "bboxes": batch["bboxes"].to(device)
+                "bbox": batch["bbox"].to(device)
             }
             labels = batch["labels"].to(device)
-            outputs = model(**inputs, task="classification")
-            logits = outputs["logits"]
+            #outputs = model(**inputs, task="classification")
+            outputs = model(**inputs)
+            logits = outputs if not isinstance(outputs, dict) else outputs["logits"]
             features = model.extract_features(**inputs)
         
         sup_loss = criterion(logits, labels)
@@ -382,12 +383,15 @@ def train_one_epoch_cil_with_evm(
                 "pixel_values": batch["pixel_values"].to(device),
                 "input_ids": batch["input_ids"].to(device),
                 "attention_mask": batch["attention_mask"].to(device),
-                "bboxes": batch["bboxes"].to(device)
+                "bbox": batch["bboxes"].to(device)
             }
             labels = batch["labels"].to(device)
             texts = batch["texts"]
-            outputs = model(**inputs, task="classification")
-            logits = outputs["logits"]
+            #outputs = model(**inputs, task="classification")
+            #logits = outputs["logits"]
+            outputs = model(**inputs)
+            logits = outputs if not isinstance(outputs, dict) else outputs["logits"]
+
             features = model.extract_features(**inputs)
 
         loss = criterion(logits, labels)

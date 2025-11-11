@@ -7,6 +7,8 @@ from PIL import Image, UnidentifiedImageError
 import torch
 from transformers import BertTokenizer
 
+from utils.llmv3.llmv3_data_loader import get_dataloaders, CILLayoutLMv3Dataset, layoutlmv3_cil_collate_fn
+
 common_transform = transforms.Compose([
     transforms.Resize((229, 229)),
     transforms.ToTensor(),
@@ -144,7 +146,7 @@ def eaml_collate_fn(batch):
 
 # ========================== DocFormer Dataset for Class IL ==========================
 class DocFormerClassILDataset(Dataset):
-    def __init__(self, data_dir: str, current_classes: List[str], tokenizer_name="bert-base-uncased", max_seq_length=512):
+    def __init__(self, data_dir: str, current_classes: List[str], tokenizer_name="bert-base-uncased", max_seq_length=256):
         self.data_dir = data_dir
         self.current_classes = [_normalize_class_name(cls) for cls in current_classes]
         self.class_to_idx = {cls: idx for idx, cls in enumerate(self.current_classes)}
@@ -208,9 +210,11 @@ def get_class_il_loader(
     model_type: str,
     data_dir: str,
     current_classes: List[str],
-    batch_size: int = 32,
-    num_workers: int = 4,
-    ocr_data: Optional[Dict] = None
+    batch_size: int = 16,
+    num_workers: int = 0,
+    ocr_data: Optional[Dict] = None,
+    max_length: int = 512,         
+    bbox_style: str = "rect"        
 ) -> DataLoader:
     """Get dataloader for class incremental learning
     Args:
@@ -250,6 +254,21 @@ def get_class_il_loader(
             batch_size=batch_size,
             num_workers=num_workers,
             collate_fn=docformer_collate_fn
+        )
+    elif model_type == "layoutlmv3":
+        dataset = CILLayoutLMv3Dataset(
+            image_dir=data_dir,
+            ocr_tensor_file=ocr_data,
+            current_classes=current_classes,
+            max_length=max_length,
+            bbox_style=bbox_style
+        )
+        return DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            collate_fn=layoutlmv3_cil_collate_fn
         )
     else:
         raise ValueError(f"Unsupported model type: {model_type}")
