@@ -143,6 +143,89 @@ def train_one_epoch_dil(
 
     return epoch_loss / batch_count, epoch_acc / batch_count
 
+def train_one_epoch_dil_evm_ood(
+    model,
+    train_loaders,
+    optimizer,
+    criterion,
+    device,
+    strategy,
+    exemplar_manager=None,
+    ewc=None,
+    old_model=None,
+    use_bias_correction=True,
+    evm=None,
+    ood_detector=None,
+    lambda_evm=0.1,
+    lambda_ood=0.1,
+):
+    model.train()
+    total_loss = 0
+    all_preds = []
+    all_labels = []
+
+    # Assume one domain loader (key = current_domain)
+    for domain_name, train_loader in train_loaders.items():
+        for batch in train_loader:
+            optimizer.zero_grad()
+
+            # Unpack batch according to your loader structure
+            images = batch["images"].to(device)
+            texts = batch.get("texts") # Optional branch
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            labels = batch["labels"].to(device)
+            outputs = model(images=images, input_ids=input_ids, attention_mask=attention_mask)
+            logits = outputs["logits"] if isinstance(outputs, dict) else outputs
+            features = model.extract_features(images=images, input_ids=input_ids, attention_mask=attention_mask, texts=texts)
+            inputs_for_ood = {
+                "images": images,
+                "input_ids": input_ids,
+                "attention_mask": attention_mask
+            }
+
+            # Standard CE loss
+            loss = criterion(logits, labels)
+
+            # EVM loss
+            if evm is not None and hasattr(evm, 'initialized') and evm.initialized and features is not None:
+                evm_probs = evm.predict_proba_tensor(features)
+                batch_indices = torch.arange(labels.size(0))
+                true_class_probs = evm_probs[batch_indices, labels.cpu()]
+                evm_loss = -torch.log(true_class_probs + 1e-8).mean()
+                loss = loss + lambda_evm * evm_loss
+
+            # OOD loss
+            if ood_detector is not None and hasattr(ood_detector, 'initialized') and ood_detector.initialized and inputs_for_ood is not None:
+                with torch.no_grad():
+                    if hasattr(ood_detector, "score_batch"):
+                        ood_scores = ood_detector.score_batch(model, inputs_for_ood, device, texts=texts)
+                        if ood_scores is not None:
+                            ood_scores_tensor = torch.tensor(ood_scores, device=device)
+                            ood_loss = ood_scores_tensor.mean()
+                            loss = loss + lambda_ood * ood_loss
+
+            # Strategy-specific loss
+            if strategy:
+                inc_loss, preds, target_labels = strategy.compute_loss(
+                    model, batch, criterion, old_model=old_model, ewc=ewc
+                )
+                loss = loss + inc_loss
+            else:
+                preds = torch.argmax(logits, dim=1)
+                target_labels = labels
+
+            loss.backward()
+            optimizer.step()
+
+            all_preds.extend(preds.detach().cpu().tolist())
+            all_labels.extend(target_labels.detach().cpu().tolist())
+            total_loss += loss.item()
+
+    avg_loss = total_loss / len(train_loader)
+    acc = np.mean(np.array(all_preds) == np.array(all_labels))
+    return avg_loss, acc
+
 
 def evaluate_dil(model, val_loaders, device):
     model.eval()

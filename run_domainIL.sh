@@ -1,8 +1,8 @@
 #!/bin/bash -l
 
 #SBATCH --job-name=dil_test_run          # Job name
-#SBATCH --output=logs/dil_test_%j.out    # Standard output log
-#SBATCH --error=logs/dil_test_%j.err     # Error log
+#SBATCH --output=logs/%x_%j.out    # Standard output log
+#SBATCH --error=logs/%x_%j.err     # Error log
 #SBATCH --partition=v100                 # GPU partition name
 #SBATCH --nodes=1                        # Number of nodes
 #SBATCH --ntasks=1                       # Number of tasks
@@ -28,52 +28,59 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export CUDA_LAUNCH_BLOCKING=1
 
 # Domain Incremental Learning Configuration
-DATA_DIR="/home/woody/iwi5/iwi5280h/dataset/"
-CHECKPOINT_DIR="checkpoints/domain_il"
-EAML_MODEL_PATH="/home/hpc/iwi5/iwi5280h/projects/FAU-Masters_Thesis-Ahad/outputs/eaml_20250601_175404/eaml_best_model.pt"
-DOCFORMER_MODEL_PATH=""
 
-# Validate data directories exist
+DATA_DIR="/home/woody/iwi5/iwi5280h/dataset"
+CHECKPOINT_DIR="/home/woody/iwi5/iwi5280h/dil_models/eaml_dil_normal$(date +%Y%m%d_%H%M%S)"
+EAML_MODEL_PATH="/home/woody/iwi5/iwi5280h/cil_models/all_class_eaml_SGD_tesseract_20250807_215555/eaml_best_model.pt"
+
+# Domain and class config
+#DOMAINS="all_prepdataset,Tobacco3482-jpg"
+GLOBAL_CLASSES="letter,form,email,handwritten,advertisement,scientific_report,scientific_publication,specification,file_folder,news_article,budget,invoice,presentation,questionnaire,resume,memo,Note,Report"
+
+# OCR tensor directories
+#OCR_TENSOR_DIRS="None" "/home/woody/iwi5/iwi5280h/dataset/Tobacco3482_ocr_texts_tesseract.pt"
+
+mkdir -p $CHECKPOINT_DIR
+
+# Validate data directories
 echo "=== Validating Data Directories ==="
-if [ ! -d "${DATA_DIR}/small_dataset" ]; then
-    echo "ERROR: small_dataset directory not found at ${DATA_DIR}/small_dataset"
-    exit 1
-fi
-
-if [ ! -d "${DATA_DIR}/small_dataset2" ]; then
-    echo "ERROR: small_dataset2 directory not found at ${DATA_DIR}/small_dataset2"
-    exit 1
-fi
-
-echo "small_dataset directory found"
-echo "small_dataset2 directory found"
+for dom in all_prepdataset Tobacco3482-jpg; do
+    if [ ! -d "${DATA_DIR}/${dom}" ]; then
+        echo "ERROR: ${dom} directory not found at ${DATA_DIR}/${dom}"
+        exit 1
+    fi
+done
+echo "all_prepdataset directory found"
+echo "Tobacco3482 directory found"
 echo ""
 
 echo "========================================="
-echo "Starting Domain Incremental Learning (NO EVM)"
+echo "Starting Domain Incremental Learning"
 echo "Data Directory: ${DATA_DIR}"
 echo "Device: $(nvidia-smi -L)"
 echo "========================================="
 
 python src/domain_incremental.py \
   --data_dir "${DATA_DIR}" \
-  --domain_list small_dataset small_dataset2 \
-  --class_counts "small_dataset:16,small_dataset2:16" \
-  --ckpt_dir "${CHECKPOINT_DIR}" \
-  --eaml_path "${EAML_MODEL_PATH}" \
-  --docformer_path "${DOCFORMER_MODEL_PATH}" \
-  --model eaml \
+  --ocr_tensor_dirs "None" "/home/woody/iwi5/iwi5280h/dataset/Tobacco3482_ocr_texts_tesseract.pt" \
+  --domains "all_prepdataset,Tobacco3482-jpg" \
+  --global_classes "${GLOBAL_CLASSES}" \
+  --eaml_ckpt_path "${EAML_MODEL_PATH}" \
+  --checkpoint_dir "${CHECKPOINT_DIR}" \
   --batch_size 16 \
-  --epochs 300 \
   --lr 1e-4 \
-  --finetune_mode partial_finetune \
-  --unfreeze_depth 2 \
-  --num_classes 16 \
-  --full_model_acc 0.7775
-
+  --num_epochs 60 \
+  --strategy distillation \
+  --temperature 2.0 \
+  --lambda_distill 1.0 \
+  --lambda_ewc 5000 \
+  --use_ewc \
+  --use_bias_correction \
+  --finetune_mode head_only \
+  --unfreeze_depth 2
 
 echo "========================================="
-echo "Domain Incremental Learning (NO EVM) Completed"
+echo "Domain Incremental Learning (EAML, Distill, EWC, Bias Corr) Completed"
 echo "Checkpoints saved in: ${CHECKPOINT_DIR}"
 
 

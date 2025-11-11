@@ -330,7 +330,7 @@ class AdaptiveLR:
 
 # ----------- Feature Extraction -----------
 
-def extract_features(model, dataloader, device):
+def extract_features_old(model, dataloader, device):
     model.eval()
     features = {}
     with torch.no_grad():
@@ -349,3 +349,104 @@ def extract_features(model, dataloader, device):
     for l in features:
         features[l] = np.stack(features[l])
     return features
+
+def extract_features(model, dataloader, device):
+    model.eval()
+    features_list = []
+    with torch.no_grad():
+        for batch in dataloader:
+            if "images" in batch and "texts" in batch:
+                images = batch["images"].to(device)
+                texts = {k: v.to(device) for k, v in batch["texts"].items()}
+                feats = model.extract_features(images, texts)
+            elif "images" in batch:
+                images = batch["images"].to(device)
+                feats = model.extract_features(images)
+            else:
+                raise KeyError(f"Batch missing 'images' key: keys are {list(batch.keys())}")
+            features_list.append(feats.cpu())
+
+    features = torch.cat(features_list, dim=0)
+    return features.numpy()
+
+def flatten_feature(feat):
+    if isinstance(feat, dict):
+        arrays = []
+        for v in feat.values():
+            if isinstance(v, dict):
+                arrays.append(flatten_feature(v))  # recursive flatten
+            elif isinstance(v, torch.Tensor):
+                arrays.append(v.cpu().numpy().ravel())
+            elif isinstance(v, np.ndarray):
+                arrays.append(v.ravel())
+            else:
+                arrays.append(np.array(v).ravel())
+        return np.concatenate(arrays)
+    elif isinstance(feat, torch.Tensor):
+        return feat.cpu().numpy()
+    elif isinstance(feat, np.ndarray):
+        return feat
+    else:
+        return np.array(feat)
+
+
+def move_to_device(data, device):
+    if torch.is_tensor(data):
+        return data.to(device)
+    elif isinstance(data, dict):
+        return {k: move_to_device(v, device) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [move_to_device(v, device) for v in data]
+    else:
+        return data
+
+
+def extract_features_and_logits(model, dataloader, device):
+    model.eval()
+    features_list = []
+    logits_list = []
+    with torch.no_grad():
+        for batch in dataloader:
+            imgs = batch["images"].to(device)
+            if "texts" in batch and batch["texts"] is not None:
+                text_inputs = {k: v.to(device) for k, v in batch["texts"].items()}
+                feats = model.extract_features(imgs, text_inputs)
+                logits = model(imgs, text_inputs)
+            else:
+                feats = model.extract_features(imgs)
+                logits = model(imgs)
+
+            features_list.append(feats.cpu())
+            logits_list.append(logits.cpu())
+
+    if len(features_list) == 0:
+        # No samples => return None for this class
+        return None, None
+
+    features_all = torch.cat(features_list, dim=0)
+    logits_all = torch.cat(logits_list, dim=0)
+
+    return features_all.numpy(), logits_all.numpy()
+
+def extract_features_by_class(model, dataloader, device):
+    model.eval()
+    feats_by_class = {}
+    with torch.no_grad():
+        for batch in dataloader:
+            # Move data to device
+            images = batch["images"].to(device)
+            labels = batch["labels"].cpu().numpy()
+            if "texts" in batch:
+                texts = {k: v.to(device) for k, v in batch["texts"].items()}
+                feats = model.extract_features(images, texts)
+            else:
+                feats = model.extract_features(images)
+            feats = feats.cpu().numpy()
+            for i, lbl in enumerate(labels):
+                if lbl not in feats_by_class:
+                    feats_by_class[lbl] = []
+                feats_by_class[lbl].append(feats[i])
+    # Stack arrays for each class
+    for lbl in feats_by_class:
+        feats_by_class[lbl] = np.stack(feats_by_class[lbl])
+    return feats_by_class

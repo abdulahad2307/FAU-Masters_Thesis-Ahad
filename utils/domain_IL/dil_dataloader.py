@@ -76,8 +76,15 @@ class EAMLDocumentDataset(datasets.ImageFolder):
 
                 # Map class label globally if mapping exists
                 if self.class_to_idx:
+                    #print("class_to_idx keys:", list(self.class_to_idx.keys()))
                     class_name = self.classes[label]
+                    # If the class name contains a space, replace spaces with underscores
+                    if ' ' in class_name:
+                        class_name = class_name.replace(' ', '_')
+                    # (Optional: also lowercase if you want to remove case sensitivity)
+                    # class_name = class_name.lower()
                     label = self.class_to_idx[class_name]
+
 
                 return {"image": image, "text": ocr_tensor, "label": label}
 
