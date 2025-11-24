@@ -462,7 +462,7 @@ def run_incremental_learning_evm_ood(
                 for fname in os.listdir(checkpoint_dir):
                     fpath = os.path.join(checkpoint_dir, fname)
                     # Skipping deletion if this is the best checkpoint, or if it's not a .pth file
-                    if fpath == path_best or not fname.endswith('.pth'):
+                    if fpath == path_best or not path_epoch: #fname.startswith('.pth'):
                         continue
                     try:
                         os.remove(fpath)

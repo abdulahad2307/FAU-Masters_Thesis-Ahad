@@ -1,8 +1,8 @@
 #!/bin/bash -l
 
-#SBATCH --job-name=eaml_CIL_with_bsamp_with_bcor        # Job name
-#SBATCH --output=logs/cil_eaml_4_%j.out    # Standard output log
-#SBATCH --error=logs/cil_eaml_4_%j.err     # Error log
+#SBATCH --job-name=eaml_CIL_with_SILS        # Job name
+#SBATCH --output=CILlogs/%x-4_%j.out    # Standard output log
+#SBATCH --error=CILlogs/%x-4_%j.err     # Error log
 #SBATCH --partition=v100                 # GPU partition name
 #SBATCH --nodes=1                        # Number of nodes
 #SBATCH --ntasks=1                       # Number of tasks
@@ -27,23 +27,38 @@ export PYTHONPATH=$PYTHONPATH:$(pwd)/FAU-Masters_Thesis-Ahad
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export CUDA_LAUNCH_BLOCKING=1
 
-OCR_TENSOR_PATH="/home/woody/iwi5/iwi5280h/dataset/all_dataset_ocr_texts_tesseract.pt"
-#BASE_MODEL="/home/hpc/iwi5/iwi5280h/projects/FAU-Masters_Thesis-Ahad/outputs/all_eaml_SGD_tesseract_20250805_223607/eaml_best_model.pt"
-BASE_MODEL="/home/woody/iwi5/iwi5280h/cil_models/eaml_cil_with_bsamp_with_bcor_20250903_072048/best_model_file_folder.pth"
-
-#CKPT_DIR="outputs/eaml_cil_with_bsamp_with_bcor$(date +%Y%m%d_%H%M%S)"
-CKPT_DIR="/home/woody/iwi5/iwi5280h/cil_models/test" #eaml_cil_with_bsamp_with_bcor_20250903_072048/"
+OCR_TENSOR_PATH="/home/woody/iwi5/iwi5280h/dataset/all_predataset_combined_ocr_texts_rectbbox_tesseract.pt"
 
 ALL_CLASSES="letter,form,email,handwritten,advertisement,scientific_report,scientific_publication,specification,file_folder,news_article,budget,invoice,presentation,questionnaire,resume,memo"
-# Subset trained on
-#BASE_CLASSES="letter,form,email,handwritten,advertisement,scientific_report,invoice,presentation,questionnaire,resume,memo"
-#BASE_CLASSES="letter,form,email,handwritten,advertisement,scientific_report,invoice,presentation,questionnaire,resume,memo,scientific_publication"
-#BASE_CLASSES="letter,form,email,handwritten,advertisement,scientific_report,invoice,presentation,questionnaire,resume,memo,scientific_publication,specification"
-BASE_CLASSES="letter,form,email,handwritten,advertisement,scientific_report,invoice,presentation,questionnaire,resume,memo,scientific_publication,specification,file_folder"
 
+#1
+#BASE_MODEL="/home/woody/iwi5/iwi5280h/emal_models/outputs/outputs/11_eaml_adamW_tesseract_20250905_004113/eaml_best_model.pt"
+#BASE_CLASSES="letter,form,email,handwritten,advertisement,scientific_report,invoice,presentation,questionnaire,resume,memo"
 # Incremental Training on
+#UNSEEN_CLASSES="scientific_publication"
+
+#2
+#BASE_MODEL="/home/woody/iwi5/iwi5280h/eaml_cil/eaml_cil_with_SILS_Final/best_model_scientific_publication.pth"
+#BASE_CLASSES="letter,form,email,handwritten,advertisement,scientific_report,invoice,presentation,questionnaire,resume,memo,scientific_publication"
+# Incremental Training on
+#UNSEEN_CLASSES="specification"
+
+#3
+#BASE_MODEL="/home/woody/iwi5/iwi5280h/eaml_cil/eaml_cil_with_SILS_Final/best_model_specification.pth"
+#BASE_CLASSES="letter,form,email,handwritten,advertisement,scientific_report,invoice,presentation,questionnaire,resume,memo,scientific_publication,specification"
+#UNSEEN_CLASSES="file_folder"
+#RESUME_CKPT="/home/woody/iwi5/iwi5280h/eaml_cil/eaml_cil_with_SILS_Final/epoch9_file_folder.pth"
+
+#4
+BASE_MODEL="/home/woody/iwi5/iwi5280h/eaml_cil/eaml_cil_with_SILS_Final/best_model_file_folder.pth"
+BASE_CLASSES="letter,form,email,handwritten,advertisement,scientific_report,invoice,presentation,questionnaire,resume,memo,scientific_publication,specification,file_folder"
 UNSEEN_CLASSES="news_article" #"scientific_publication,specification,file_folder,news_article,budget"
 
+# Subset trained on
+#BASE_CLASSES="letter,form,email,handwritten,advertisement,scientific_report,invoice,presentation,questionnaire,resume,memo,scientific_publication,specification,file_folder,news_article"
+#BASE_CLASSES="letter,form,email,handwritten,advertisement,scientific_report,invoice,presentation,questionnaire,resume,memo,scientific_publication,specification,file_folder,news_article,budget"
+
+CKPT_DIR="/home/woody/iwi5/iwi5280h/eaml_cil/eaml_cil_with_SILS_Final"
 
 mkdir -p $CKPT_DIR
 
@@ -58,10 +73,10 @@ python src/class_incremental.py \
   --base_model_path "$BASE_MODEL" \
   --model_name "eaml" \
   --checkpoint_dir "$CKPT_DIR" \
-  --batch_size 16 \
+  --batch_size 64 \
   --lr 1e-3 \
   --num_epochs 100 \
-  --strategy "distillation" \
+  --strategy "standard" \
   --temperature 2.0 \
   --lambda_distill 1.0 \
   --lambda_ewc 5000.0 \
@@ -70,9 +85,11 @@ python src/class_incremental.py \
   --max_exemplars 320 \
   --exemplar_selection "herding" \
   --training_mode "last_layer" \
-  --full_model_acc 0.6195 \
+  --full_model_acc 0.6860 \
   --weight_decay 0.01 \
-  --patience 10
+  --patience 5 \
+  #--resume \
+  #--resume_checkpoint "$RESUME_CKPT" \
 
   # For resume:
   # --resume \

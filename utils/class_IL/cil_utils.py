@@ -616,3 +616,49 @@ def extract_feature_vectors(model, dataloader, device):
             features.append(feat.cpu())
     features = torch.cat(features, dim=0)
     return features.numpy()
+
+
+def extract_feature_vectors2(model, dataloader, device,class_names):
+    model.eval()
+    feature_dict = {}
+
+    with torch.no_grad():
+        for i, batch in enumerate(dataloader):
+            #print(f"Processing batch {i+1}/{len(dataloader)}")
+            if "images" in batch:
+                images = batch["images"].to(device)
+                input_ids = batch["texts"]["input_ids"].to(device)
+                attention_mask = batch["texts"]["attention_mask"].to(device)
+                feat = model.extract_features(images=images, input_ids=input_ids, attention_mask=attention_mask)
+            elif "pixel_values" in batch:
+                inputs = {
+                    "pixel_values": batch["pixel_values"].to(device),
+                    "input_ids": batch["input_ids"].to(device),
+                    "attention_mask": batch["attention_mask"].to(device),
+                    "bbox": batch["bbox"].to(device)
+                }
+                feat = model.extract_features(**inputs)
+            else:
+                raise KeyError(f"Batch missing both 'images' and 'pixel_values' keys: batch keys are {batch.keys()}")
+            
+            labels = batch['labels']
+            # Convert label indices or strings to string keys
+            labels_str = []
+            for l in labels:
+                if isinstance(l, torch.Tensor):
+                    l = l.item()
+                labels_str.append(class_names[l] if isinstance(class_names[0], str) else l)
+            
+            feat = feat.cpu().numpy()
+
+            for f_vec, lbl in zip(feat, labels_str):
+                if lbl not in feature_dict:
+                    feature_dict[lbl] = []
+                feature_dict[lbl].append(f_vec)
+
+    # Stack each list of features into numpy arrays
+    for key in feature_dict:
+        feature_dict[key] = np.stack(feature_dict[key], axis=0)
+
+    return feature_dict
+
