@@ -169,7 +169,7 @@ class EAMLTrainer:
         print(f"Evaluation - Loss: {avg_loss:.4f}, Cls Loss: {avg_cls_loss:.4f}, KLD Loss: {avg_kld_loss:.4f}, Accuracy: {accuracy:.2f}%")
         return avg_loss, accuracy
 
-    def save_checkpoint(self, output_dir, epoch, val_loss, is_best=False):
+    def save_checkpoint(self, output_dir, epoch, val_loss, val_acc, is_best=False):
         os.makedirs(output_dir, exist_ok=True)
         checkpoint_path = os.path.join(output_dir, f"eaml_checkpoint_ep{epoch+1}.pt")
         torch.save({
@@ -177,7 +177,8 @@ class EAMLTrainer:
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
-            'val_loss': val_loss
+            'val_loss': val_loss,
+            'val_acc': val_acc
         }, checkpoint_path)
         if is_best:
             best_model_path = os.path.join(output_dir, "eaml_best_model.pt")
@@ -311,7 +312,7 @@ def main():
             is_best = val_loss < best_val_loss
             if is_best:
                 best_val_loss = val_loss
-            trainer.save_checkpoint(args.output_dir, epoch, val_loss, is_best)
+            trainer.save_checkpoint(args.output_dir, epoch, val_loss,val_acc, is_best)
             trainer.cleanup_checkpoints(args.output_dir, keep_last_n=args.keep_checkpoints)
             early_stopping(val_loss)
             if early_stopping.early_stop:

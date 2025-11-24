@@ -1,8 +1,8 @@
 #!/bin/bash -l
 
 #SBATCH --job-name=eaml_11_class_training_tesseract_adamW          # Job name
-#SBATCH --output=logs/%x-15_%j.out           # Standard output log
-#SBATCH --error=logs/%x-15_%j.err            # Error log
+#SBATCH --output=logs/%x-16_%j.out           # Standard output log
+#SBATCH --error=logs/%x-16_%j.err            # Error log
 #SBATCH --partition=v100                  # GPU partition name
 #SBATCH --nodes=1                         # Number of nodes
 #SBATCH --ntasks=1                        # Number of tasks
@@ -37,7 +37,7 @@ CLASSES="letter,form,email,handwritten,advertisement,scientific_report,invoice,p
 ## 11_class
 OUTPUT_DIR="/home/woody/iwi5/iwi5280h/emal_models/outputs/outputs/11_eaml_adamW_tesseract_20250905_004113"
 
-OCR_DATA_PATH="/home/woody/iwi5/iwi5280h/dataset/all_dataset_ocr_texts_tesseract.pt " #all_dataset_ocr_texts_trocr.pt
+OCR_DATA_PATH="/home/woody/iwi5/iwi5280h/dataset/all_dataset_ocr_texts_tesseract.pt" #all_dataset_ocr_texts_trocr.pt
 
 mkdir -p $OUTPUT_DIR
 mkdir -p logs
@@ -46,7 +46,7 @@ mkdir -p logs
 #CHECKPOINT_PATH="/home/woody/iwi5/iwi5280h/emal_models/outputs/outputs/all_eaml_adamW_tesseract_20250914_221921/eaml_checkpoint_ep9.pt"  # Set path if resuming
 
 #11_class
-CHECKPOINT_PATH="/home/woody/iwi5/iwi5280h/emal_models/outputs/outputs/11_eaml_adamW_tesseract_20250905_004113/eaml_checkpoint_ep69.pt"  # Set path if resuming
+CHECKPOINT_PATH="/home/woody/iwi5/iwi5280h/emal_models/outputs/outputs/11_eaml_adamW_tesseract_20250905_004113/eaml_checkpoint_ep78.pt"  # Set path if resuming
 
 # Resume from checkpoint
 RESUME_ARG=""
@@ -66,7 +66,7 @@ python src/sota_eaml_model.py \
   --class_mapping_path $CLASS_MAPPING_PATH \
   --classes $CLASSES \
   --device cuda \
-  --patience 10 \
+  --patience 1 \
   --keep_checkpoints 2 \
   --cls_weight 1.0 \
   --kld_weight 0.5 \
