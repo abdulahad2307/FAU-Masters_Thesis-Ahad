@@ -1,8 +1,8 @@
 #!/bin/bash -l
 
-#SBATCH --job-name=dil_test_run          # Job name
-#SBATCH --output=logs/%x_%j.out    # Standard output log
-#SBATCH --error=logs/%x_%j.err     # Error log
+#SBATCH --job-name=eaml_dil_SILS          # Job name
+#SBATCH --output=eaml_dil_logs_final/%x_%j.out    # Standard output log
+#SBATCH --error=eaml_dil_logs_final/%x_%j.err     # Error log
 #SBATCH --partition=v100                 # GPU partition name
 #SBATCH --nodes=1                        # Number of nodes
 #SBATCH --ntasks=1                       # Number of tasks
@@ -30,8 +30,9 @@ export CUDA_LAUNCH_BLOCKING=1
 # Domain Incremental Learning Configuration
 
 DATA_DIR="/home/woody/iwi5/iwi5280h/dataset"
-CHECKPOINT_DIR="/home/woody/iwi5/iwi5280h/dil_models/eaml_dil_normal$(date +%Y%m%d_%H%M%S)"
-EAML_MODEL_PATH="/home/woody/iwi5/iwi5280h/cil_models/all_class_eaml_SGD_tesseract_20250807_215555/eaml_best_model.pt"
+CHECKPOINT_DIR="/home/woody/iwi5/iwi5280h/dil_models/eaml_dil_normal_final2"
+
+EAML_MODEL_PATH="/home/woody/iwi5/iwi5280h/emal_models/outputs/outputs/all_eaml_adamW_tesseract_20250914_221921/eaml_best_model.pt"
 
 # Domain and class config
 #DOMAINS="all_prepdataset,Tobacco3482-jpg"
@@ -67,10 +68,10 @@ python src/domain_incremental.py \
   --global_classes "${GLOBAL_CLASSES}" \
   --eaml_ckpt_path "${EAML_MODEL_PATH}" \
   --checkpoint_dir "${CHECKPOINT_DIR}" \
-  --batch_size 16 \
+  --batch_size 32 \
   --lr 1e-4 \
-  --num_epochs 60 \
-  --strategy distillation \
+  --num_epochs 100 \
+  --strategy standard \
   --temperature 2.0 \
   --lambda_distill 1.0 \
   --lambda_ewc 5000 \

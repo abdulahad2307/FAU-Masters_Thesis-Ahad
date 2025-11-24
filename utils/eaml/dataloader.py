@@ -158,7 +158,7 @@ class EAML_Dataset(Dataset):
             label_idx = label
         else:
             raise ValueError(f"Unknown label type: {type(label)}")
-
+        
         # printing for first sample
         if idx == 0:
             print(f"Sample 0 label (raw): {label}, mapped idx: {label_idx}")
@@ -186,8 +186,11 @@ class EAML_Dataset(Dataset):
                 "img_path": img_path
             }
         except Exception as e:
-            print(f"Error loading sample {img_path}: {e}")
-            raise
+            #print(f"Error loading sample {img_path}: {e}")
+            #raise
+            print(f"Warning: Skipping corrupted image {img_path}")
+            #return self.__getitem__((index + 1) % len(self))
+            return self.__getitem__((idx + 1) % len(self))
 
 def eaml_collate_fn(batch: List[Dict]) -> Dict:
     return {

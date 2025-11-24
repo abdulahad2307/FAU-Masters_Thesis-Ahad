@@ -12,7 +12,6 @@ from utils.domain_IL.dil_utils import (
     StandardDomainIL, DistillationDomainIL, EWC, ExemplarManager, AdaptiveLR
 )
 from utils.domain_IL.dil_model_loader import load_eaml_model_partial, set_finetune_mode
-from utils.evm.evm_classifier import EVMClassifier
 from utils.ievm.ievm import IncrementalEVM
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -118,8 +117,7 @@ def train_one_epoch_dil_evm(
 
 def evm_evaluate(model, loader, global_classes, evm_tailsize=0.3, evm_threshold=0.7):
     feature_dict, features, labels = extract_features_for_evm(model, loader, DEVICE, global_classes)
-    evm = EVMClassifier(tailsize=evm_tailsize, cover_threshold=evm_threshold)
-    #evm = IncrementalEVM(tailsize=evm_tailsize, ev_budget=10, cover_threshold=evm_threshold)
+    evm = IncrementalEVM(tailsize=evm_tailsize, ev_budget=10, cover_threshold=evm_threshold)
     evm.fit(feature_dict)
     preds, _ = evm.predict(features, threshold=evm_threshold)
 
@@ -209,13 +207,12 @@ def run_domain_incremental_with_evm_training(
     old_model.eval()
     best_val_acc = 0.0
     best_val_loss = float('inf')
-    best_model_path = None
+    best_model_path = os.path.join(checkpoint_dir, "best_model.pth")
     no_improve = 0
     start_epoch = 1
 
     # EVM initialization for hybrid loss
-    evm_hybrid = EVMClassifier(tailsize=evm_tailsize, cover_threshold=evm_threshold)
-    #evm_hybrid = IncrementalEVM(tailsize=evm_tailsize, ev_budget=10, cover_threshold=evm_threshold)
+    evm_hybrid = IncrementalEVM(tailsize=evm_tailsize, ev_budget=10, cover_threshold=evm_threshold)
     # Initial EVM fit on seed train
     feature_dict, _, _ = extract_features_for_evm(model, train_loader, DEVICE, global_classes)
     evm_hybrid.fit(feature_dict)
@@ -228,7 +225,7 @@ def run_domain_incremental_with_evm_training(
         no_improve = checkpoint.get('no_improve', 0)
         best_val_acc = checkpoint.get('best_val_acc', 0.0)
         best_val_loss = checkpoint.get('best_val_loss', float('inf'))
-        best_model_path = os.path.join(checkpoint_dir, "best_model.pth")
+        best_model_path = best_model_path
         print(f"Resumed at epoch {start_epoch}, patience={no_improve}, best_val_acc={best_val_acc}, best_val_loss={best_val_loss}")
     print("Dataset overview:")
     counts = dil_loader.get_class_counts()
@@ -272,12 +269,11 @@ def run_domain_incremental_with_evm_training(
             "best_val_loss": best_val_loss,
         }
         if is_best:
-            save_checkpoint_dil(model, optimizer, epoch, os.path.join(checkpoint_dir, "best_model.pth"), extra_data=extra_data)
+            save_checkpoint_dil(model, optimizer, epoch, best_model_path, extra_data=extra_data)
         save_epoch_checkpoint_dil(model, optimizer, epoch, checkpoint_dir, is_best=is_best, extra_data=extra_data, max_keep_last=2)
-        
+
         if is_best:
             print(f"Validation improved at epoch {epoch}, evaluating test sets...")
-            
             pretrained_acc, _ = evaluate_domain(model, test_loader_pretrained, DEVICE, len(global_classes), global_classes)
             print(f"Test accuracy on pretrained domain '{pretrained_domain}': {pretrained_acc:.4f}")
 
@@ -285,10 +281,10 @@ def run_domain_incremental_with_evm_training(
             print(f"Test accuracy on incremental domain '{incremental_domain}': {incremental_acc:.4f}")
 
         if is_best:
-            print(f"Validation improved at epoch {epoch}, evaluating test sets with EVM...")
+            print(f"Validation improved at epoch {epoch}, evaluating test sets with iEVM...")
             for domain_name, loader in [(pretrained_domain, test_loader_pretrained), (incremental_domain, test_loader_incremental)]:
                 accuracy, _ = evm_evaluate(model, loader, global_classes, evm_tailsize, evm_threshold)
-                print(f"EVM Test accuracy on domain '{domain_name}': {accuracy:.4f}")
+                print(f"iEVM Test accuracy on domain '{domain_name}': {accuracy:.4f}")
         lr_scheduler.step({'accuracy': val_acc, 'loss': val_loss})
     model.load_state_dict(torch.load(best_model_path, map_location=DEVICE))
 
@@ -297,10 +293,10 @@ def run_domain_incremental_with_evm_training(
         acc, _ = evaluate_domain(model, loader, DEVICE, len(global_classes), global_classes)
         print(f"Test accuracy on domain '{domain_name}': {acc:.4f}")
 
-    print("Final EVM evaluation on test datasets:")
+    print("Final iEVM evaluation on test datasets:")
     for domain_name, loader in [(pretrained_domain, test_loader_pretrained), (incremental_domain, test_loader_incremental)]:
         accuracy, _ = evm_evaluate(model, loader, global_classes, evm_tailsize, evm_threshold)
-        print(f"Final EVM accuracy on domain '{domain_name}': {accuracy:.4f}")
+        print(f"Final iEVM accuracy on domain '{domain_name}': {accuracy:.4f}")
 
 if __name__ == "__main__":
     import argparse

@@ -1,5 +1,6 @@
 import torch
-from utils.eaml.eaml_model import EAMLModel  
+#from utils.eaml.eaml_model import EAMLModel  
+from eaml.eaml_model import EAMLModel  
 
 
 def load_eaml_model(checkpoint_path, num_classes, device, text_branch=True):
