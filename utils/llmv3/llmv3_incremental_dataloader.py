@@ -1,11 +1,12 @@
 import os
 import gc
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader,Subset
 from pathlib import Path
 from PIL import Image, UnidentifiedImageError
 import torchvision.transforms as T
 import random
+import numpy as np
 
 def poly8_to_bbox4(poly):
     xs = poly[0::2]
@@ -27,6 +28,7 @@ class IncrementalOCRTensorsDataset(Dataset):
         dataset_name: str = "rvl_cdip",  # or "tobacco3482"
     ):
         self.image_dir = Path(image_dir)
+        self.ocr_tensor_dir = Path(ocr_tensor_file)  # directory containing .pt files
         self.included_classes = included_classes
         self.class2idx = {c: i for i, c in enumerate(included_classes)}
         self.max_length = max_length
@@ -39,19 +41,7 @@ class IncrementalOCRTensorsDataset(Dataset):
         ])
         self.dataset_name = dataset_name
 
-        self.ocr_data = torch.load(ocr_tensor_file)
-        
-        # Build map from normalized lower-case image_path to OCR entries
-        self.ocr_map = {}
-        for entry in self.ocr_data:
-            img_path = entry.get("image_path", "")
-            filename = Path(img_path).name.lower()  # extract only filename and lowercase
-            self.ocr_map[filename] = entry
-
-        del self.ocr_data
-        gc.collect()
-
-        # Collect samples: tuples of (image_path, ocr_dict, class_name)
+        # Collect samples: tuples of (image_path, None, class_name)
         random.seed(seed)
         self.samples = []
         print(f"Looking for classes: {included_classes}")
@@ -63,25 +53,22 @@ class IncrementalOCRTensorsDataset(Dataset):
                 class_dir = self.image_dir / class_name
             else:
                 raise ValueError(f"Unknown dataset_name {dataset_name}")
-            
-            print(f"Checking {class_dir} exists? {class_dir.exists()}")
+
+            #print(f"Checking {class_dir} exists? {class_dir.exists()}")
 
             if not class_dir.exists():
                 continue
 
-            images = list(class_dir.glob("*.*"))
-            #print(f"  Found {len(images)} images")
-            #for img in images[:3]:
-                    #print(f"    {img.name}")
+            #images = list(class_dir.glob("*.*"))
+            valid_extensions = ['.jpg', '.jpeg', '.png', '.tiff','.tif', '.bmp']
+            images = [img for img in class_dir.iterdir() if img.suffix.lower() in valid_extensions]
             if images_per_class:
                 images = random.sample(images, min(images_per_class, len(images)))
+            else:
+                images = random.sample(images, len(images))
 
             for img_path in images:
-                #img_key = img_path.relative_to(self.image_dir).as_posix().lower()
-                img_key = img_path.name.lower()  # the filename of image only
-
-                if img_key in self.ocr_map:
-                    self.samples.append((img_path, self.ocr_map[img_key], class_name))
+                self.samples.append((img_path, None, class_name))
 
         # Append exemplars if provided
         if exemplar_samples:
@@ -90,17 +77,26 @@ class IncrementalOCRTensorsDataset(Dataset):
                 ex_img_path_full = self.image_dir / ex_img_path
                 cls = ex.get('label', None)
                 self.samples.append((ex_img_path_full, ex, cls))
+        print(f"[DEBUG] Dataset '{dataset_name}' loaded {len(self.samples)} samples for classes: {included_classes}")
+
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        img_path, ocr_dict, cls = self.samples[idx]
+        img_path, ex_ocr_dict, cls = self.samples[idx]
         try:
             pil_image = Image.open(str(img_path)).convert("RGB")
         except (UnidentifiedImageError, OSError):
             pil_image = Image.new("RGB", (224, 224), color="white")
         image = self.transform(pil_image)
+
+        # Load OCR tensor on-demand if not an exemplar (exemplar OCR dict directly)
+        if ex_ocr_dict is not None:
+            ocr_dict = ex_ocr_dict
+        else:
+            ocr_tensor_path = self.ocr_tensor_dir / (img_path.stem + ".pt")
+            ocr_dict = torch.load(str(ocr_tensor_path))
 
         input_ids = ocr_dict["input_ids"]
         input_ids = input_ids.clamp(min=0, max=self.max_length - 1)
@@ -144,7 +140,6 @@ class IncrementalOCRTensorsDataset(Dataset):
             "labels": label,
         }
 
-
     def _pad_truncate(self, tensor, max_len):
         N = tensor.shape[0]
         if N > max_len:
@@ -169,24 +164,54 @@ def get_incremental_dataloader(
     images_per_class: int = None,
     seed: int = 42,
 ):
-    # Determine the split folder path inside data_dir
-    #if dataset_name == "rvl_cdip":
-    #    data_path = os.path.join(image_dir, split)  # e.g., data_dir/train or data_dir/val
-    #else:
-    data_path = image_dir 
+    base_path = Path(image_dir)
+    split_path = base_path / split
+
+    # Check if split folder exists (for datasets with explicit splits)
+    if split_path.exists():
+        data_path = base_path
+        use_internal_split = False
+        print("Taking All")
+        print(f"Loading data from folder: {data_path}")
+    else:
+        data_path = base_path
+        use_internal_split = True
+        print("Splitting data 80-10-10")
+        print(f"Loading data from folder: {data_path}")
+
     
-    # build dataset only from that folder path with classes filtering
-    dataset = IncrementalOCRTensorsDataset(
-        image_dir=data_path,
+    full_dataset = IncrementalOCRTensorsDataset(
+        image_dir=str(data_path),
         ocr_tensor_file=ocr_tensor_file,
         included_classes=classes,
         max_length=max_length,
         bbox_style=bbox_style,
-        images_per_class=images_per_class,
+        images_per_class=None if use_internal_split else images_per_class,
         seed=seed,
         dataset_name=dataset_name,
     )
-    
+
+    if use_internal_split:
+        # Internal train/val/test split (e.g., 80/10/10 ratio)
+        num_samples = len(full_dataset)
+        np.random.seed(seed)
+        indices = np.random.permutation(num_samples)
+        train_end = int(0.8 * num_samples)
+        val_end = train_end + int(0.1 * num_samples)
+
+        if split == "train":
+            split_indices = indices[:train_end]
+        elif split == "val":
+            split_indices = indices[train_end:val_end]
+        elif split == "test":
+            split_indices = indices[val_end:]
+        else:
+            raise ValueError(f"Unknown split: {split}")
+
+        dataset = Subset(full_dataset, split_indices.tolist())
+    else:
+        dataset = full_dataset
+
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -194,6 +219,5 @@ def get_incremental_dataloader(
         num_workers=4,
         pin_memory=True,
     )
-    
-    return loader
 
+    return loader

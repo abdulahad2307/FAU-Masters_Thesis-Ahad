@@ -14,6 +14,13 @@ import torch.optim as optim
 import torch.cuda.amp as amp
 from tqdm import tqdm
 
+# Added imports for EVM integration
+#from utils.evm.evm_classifier import EVMClassifier
+from utils.evm.evm_classifier_reg import RegularizedEVMClassifier
+from utils.evm.evm_eval import evm_openset_metrics
+from utils.class_IL.cil_utils import extract_feature_vectors, extract_feature_vectors2
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="LayoutLMv3 Incremental Training")
     parser.add_argument('--data_dir', required=True)
@@ -60,7 +67,7 @@ def main():
     base_num_classes = len(base_classes)
     total_num_classes = len(all_classes)
 
-    base_model_acc = 0.9633
+    base_model_acc = 96.33
     print("Loading Base Model.....")
     base_model = LayoutLMv3(
         text_model_name='bert-base-uncased',
@@ -76,6 +83,8 @@ def main():
     gc.collect()
     torch.cuda.empty_cache()
 
+    # Initialize EVM classifier
+    evm = RegularizedEVMClassifier(tailsize=0.5, cover_threshold=0.7, lambda_reg=0.1)
     if args.training_mode == 'last_layer':
         for name, param in model.named_parameters():
             if "classifier" not in name:
@@ -140,7 +149,6 @@ def main():
     base_class_indices = [all_classes.index(c) for c in base_classes]
     exemplar_handler = ExemplarHandler(max_exemplars_per_class=args.max_exemplars, selection_method=args.exemplar_selection)
     if args.exemplar_selection == 'herding':
-        #exemplar_handler.update_exemplars(base_train_loader.dataset, base_classes, model, device)
         exemplar_handler.update_exemplars(base_train_loader.dataset, base_class_indices, model, device)
     else:
         exemplar_handler.update_exemplars(base_train_loader.dataset, base_classes, model, device)
@@ -150,20 +158,9 @@ def main():
     combined_loader = DataLoader(combined_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
     print("Exemplar dataset prepared.")
 
-    """
-    print("Checking exemplars per base class:")
-    exemplar_counts = {}
-    for cls in base_class_indices:
-        count = sum(1 for ex in exemplar_samples if (isinstance(ex['labels'], int) and ex['labels'] == cls) or 
-                                                (isinstance(ex['labels'], str) and all_classes[cls] == ex['labels']))
-        exemplar_counts[cls] = count
-        print(f"  Class {all_classes[cls]} (index {cls}): {count} exemplars")
-    """
     print(f"Total exemplar samples: {len(exemplar_samples)}")
     print(f"Total unseen train samples: {len(unseen_train_loader.dataset)}")
     print(f"Combined training dataset samples: {len(combined_dataset)}")
-    
-
 
     ewc = EWC(model, base_train_loader, device, fisher_n=500, lambda_ewc=args.lambda_ewc) if args.use_ewc else None
 
@@ -208,16 +205,10 @@ def main():
             for k in ['input_ids', 'attention_mask', 'bbox', 'pixel_values']:
                 batch[k] = batch[k].to(device)
 
-            #batch['labels'] = torch.tensor(
-            #    [all_classes.index(lbl) if isinstance(lbl, str) else lbl for lbl in batch['labels']],
-            #    device=device
-            #)
             batch['labels'] = torch.tensor(
-                [all_classes.index(lbl) if isinstance(lbl, str) else int(lbl) for lbl in batch['labels']],
-                dtype=torch.long,
+                [all_classes.index(lbl) if isinstance(lbl, str) else lbl for lbl in batch['labels']],
                 device=device
             )
-
 
             optimizer.zero_grad()
 
@@ -235,7 +226,6 @@ def main():
                 if ewc:
                     loss += ewc.penalty(model)
 
-
             # Scale loss and backpropagate
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -247,7 +237,7 @@ def main():
             correct += predicted.eq(batch['labels']).sum().item()
 
             # Aggressive cleanup
-            del batch, old_logits, new_logits_raw, loss, cls_loss, predicted #kd_loss
+            del batch, old_logits, new_logits_raw, loss, cls_loss, predicted #kd_loss,
             torch.cuda.empty_cache()
             gc.collect()
 
@@ -259,7 +249,7 @@ def main():
             train_loss = running_loss / total if total > 0 else 0
             loop.set_postfix(loss=train_loss, acc=train_acc)
 
-        print(f"\nEpoch {epoch + 1}: Train Loss {train_loss:.4f}, Train Acc {train_acc:.4f}")
+        print(f"Epoch {epoch + 1}: Train Loss {train_loss:.4f}, Train Acc {train_acc:.4f}")
 
         # Bias correction update *after* unseen class incremental step
         model.eval()
@@ -282,18 +272,54 @@ def main():
             split_name="Val",
             bias_correction=bias_correction
         )
-        print(f"\nEpoch {epoch + 1}: Val Loss {val_loss:.4f}, Val Acc {val_acc:.4f}")
+        print(f"Epoch {epoch + 1}: Val Loss {val_loss:.4f}, Val Acc {val_acc:.4f}")
 
         gil_previous = (val_acc - args.full_model_acc) / (1 - args.full_model_acc)
-        print(f"\nGIL_PreClass-val:{gil_previous:.4f}")
+        print(f"GIL_PreClass-val:{gil_previous:.4f}")
 
         gil_base = (val_acc - base_model_acc) / (1 - base_model_acc)
-        print(f"\nGIL_Base-val:{gil_base:.4f}")
+        print(f"GIL_Base-val:{gil_base:.4f}")
+
+        """
+        # --- EVM integration after validation ---
+        print("Extracting features per class for EVM fitting...")
+        features_per_class = {}
+        from torch.utils.data import Subset
+        for cls in base_classes + unseen_classes:
+            cls_idx = all_classes.index(cls)
+            class_indices = [i for i, example in enumerate(combined_loader.dataset) if
+                             (isinstance(example['labels'], int) and example['labels'] == cls_idx) or
+                             (isinstance(example['labels'], str) and example['labels'] == cls)]
+            class_subset = Subset(combined_loader.dataset, class_indices)
+            class_loader = DataLoader(class_subset, batch_size=args.batch_size, shuffle=False, num_workers=4)
+            feats = extract_feature_vectors(model, class_loader, device)
+            features_per_class[cls] = feats
+        torch.cuda.empty_cache()
+        evm.fit_cuda(features_per_class, device=device)
+        print("Fitted EVM on current incremental step.")
+        """
+
+        # --- EVM integration after validation ---
+        print("Extracting features for all classes for EVM fitting...")
+        features_per_class = extract_feature_vectors2(model, combined_loader, device, all_classes)
+
+        torch.cuda.empty_cache()
+        if not features_per_class:
+            raise RuntimeError("No features extracted for EVM fitting; training data may be empty or mismatched classes.")
+
+        print(f"Fitting EVM on classes: {list(features_per_class.keys())}")
+        evm.fit(features_per_class)
+        print("Fitted EVM on current incremental step.")
+        # EVM open set validation evaluation
+        #val_features_dict = extract_feature_vectors(model, val_loader, device)
+        val_features_dict = extract_feature_vectors2(model, val_loader, device,all_classes)
+        val_os_result = evm_openset_metrics(evm, val_features_dict, known_classes=base_classes + unseen_classes)
+        print(f"[EVM Open Set Val] Known acc: {val_os_result['open_set_accuracy']:.4f}, Unknown rejection: {val_os_result['unknown_rejection']:.4f}")
 
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             patience_counter = 0
-            save_path = os.path.join(args.checkpoint_dir, f"layoutlmv3_cil_incremental_{args.unseen_classes}_best.pt")
+            save_path = os.path.join(args.checkpoint_dir, f"layoutlmv3_cil_incremental_reg_evm_{args.unseen_classes}_best.pt")
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
@@ -305,22 +331,33 @@ def main():
             print(f"Saved best model checkpoint: {save_path}")
         else:
             patience_counter += 1
-
+            
         print(f"Patience counter: {patience_counter} / {args.patience}")
+
         if patience_counter > args.patience:
             print(f"Early stopping triggered. Patience counter exceeded {args.patience}.")
             break
     print("Training completed. Loading best model for testing ...")
-    best_ckpt = torch.load(os.path.join(args.checkpoint_dir, f"layoutlmv3_cil_incremental_{args.unseen_classes}_best.pt"), map_location=device)
+    best_ckpt = torch.load(os.path.join(args.checkpoint_dir, f"layoutlmv3_cil_incremental_reg_evm_{args.unseen_classes}_best.pt"), map_location=device)
     model.load_state_dict(best_ckpt['model_state_dict'])
     model.eval()
 
     test_loss, test_acc, test_p, test_r, test_f1, test_gil, test_class_acc = evaluate(model, test_loader, device, all_classes, args.full_model_acc, split_name="Test")
 
-    print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_acc:.4f}, F1: {test_f1:.4f}, GIL_Previous:{test_gil:.4f}")
+    print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_acc:.4f}, F1: {test_f1:.4f}")
 
+    gil_previous = (test_acc - args.full_model_acc) / (1 - args.full_model_acc)
+    print(f"GIL_PreClass-test:{gil_previous:.4f}")
+    
     gil_base = (test_acc - base_model_acc) / (1 - base_model_acc)
-    print(f"\nGIL_Base-Test:{gil_base:.4f}")
+    print(f"GIL_Base-Test:{gil_base:.4f}")
+
+    # EVM open set test evaluation
+    #test_features_dict = extract_feature_vectors(model, test_loader, device)
+    test_features_dict =extract_feature_vectors2(model, test_loader, device,all_classes)
+    test_os_result = evm_openset_metrics(evm, test_features_dict, known_classes=base_classes + unseen_classes)
+    print(f"[EVM Open Set Test] Known acc: {test_os_result['open_set_accuracy']:.4f}, Unknown rejection: {test_os_result['unknown_rejection']:.4f}")
+
 
 if __name__ == "__main__":
     main()

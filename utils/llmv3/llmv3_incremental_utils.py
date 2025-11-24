@@ -5,6 +5,7 @@ from torch.utils.data import Dataset
 import random
 from sklearn.metrics import precision_recall_fscore_support, accuracy_score
 
+
 def expand_classifier(model, old_num_classes, new_num_classes, device):
     old_classifier = model.classifier
     old_weight = old_classifier.weight.data
@@ -23,13 +24,15 @@ def expand_classifier(model, old_num_classes, new_num_classes, device):
 
     model.classifier = new_classifier
 
+
 class BiasCorrectionLayer(nn.Module):
     def __init__(self, num_old_classes, num_new_classes):
         super().__init__()
-        self.bias = nn.Parameter(torch.zeros(num_old_classes + num_new_classes))
+        self.bias_vector = nn.Parameter(torch.zeros(num_old_classes + num_new_classes))
 
     def forward(self, logits):
-        return logits + self.bias
+        return logits + self.bias_vector
+
 
 class EWC:
     def __init__(self, model, dataloader, device, fisher_n=500, lambda_ewc=5000):
@@ -56,8 +59,11 @@ class EWC:
             for k in batch:
                 batch[k] = batch[k].to(self.device)
             self.model.zero_grad()
-            outputs = self.model(**batch)
-            loss = F.cross_entropy(outputs.logits, batch['labels'])
+
+            model_inputs = {k: v for k, v in batch.items() if k != 'labels'}
+            outputs = self.model(**model_inputs)
+
+            loss = F.cross_entropy(outputs, batch['labels'])
             loss.backward()
             for n, p in self.model.named_parameters():
                 if p.grad is not None:
@@ -67,12 +73,14 @@ class EWC:
         for n in self._fisher:
             self._fisher[n] /= count
 
+
     def penalty(self, model):
         loss = 0
         for n, p in model.named_parameters():
             if n in self._fisher:
                 loss += (self._fisher[n] * (p - self._means[n]).pow(2)).sum()
         return self.lambda_ewc * loss
+
 
 def distillation_loss(new_logits, old_logits, temperature=2.0, alpha=0.5):
     new_logits_scaled = new_logits / temperature
@@ -84,6 +92,7 @@ def distillation_loss(new_logits, old_logits, temperature=2.0, alpha=0.5):
     ) * (temperature ** 2)
     return loss * alpha
 
+
 class ExemplarHandler:
     def __init__(self, max_exemplars_per_class=20, selection_method="random"):
         self.max_exemplars_per_class = max_exemplars_per_class
@@ -91,8 +100,13 @@ class ExemplarHandler:
         self.exemplars = {}
 
     def update_exemplars(self, dataset, class_labels, model, device):
-        model.eval()
         self.exemplars = {}
+        if model is not None:
+            model.eval()
+        else:
+            # If no model provided (e.g., random selection), skip feature extraction
+            print("Warning: No model provided for exemplar update. Random selection required.")
+        
         for cls in class_labels:
             features = []
             indices = []
@@ -101,28 +115,42 @@ class ExemplarHandler:
                     sample = dataset[i]
                     if sample['labels'].item() != cls:
                         continue
-                    inputs = {k: v.unsqueeze(0).to(device) for k, v in sample.items() if k != 'labels' and k != 'image_id'}
-                    feat = model.extract_features(**inputs)
-                    features.append(feat.squeeze(0).cpu())
-                    indices.append(i)
+                    if model is not None:
+                        inputs = {k: v.unsqueeze(0).to(device) for k, v in sample.items() if k != 'labels' and k != 'image_id'}
+                        feat = model.extract_features(**inputs)
+                        features.append(feat.squeeze(0).cpu())
+                        indices.append(i)
+                    else:
+                        # If no model, randomly select exemplars
+                        # This will be handled later outside this loop
+                        pass
 
-            features = torch.stack(features)
-            class_mean = features.mean(dim=0)
-            selected_idxs = []
-            exemplar_feats = []
+            if model is not None:
+                if len(features) == 0:
+                    #print(f"Warning: No features extracted for class {cls}, skipping exemplar selection for this class.")
+                    continue
+                features = torch.stack(features)
+                class_mean = features.mean(dim=0)
+                selected_idxs = []
+                exemplar_feats = []
 
-            features_accum = features.clone()
+                features_accum = features.clone()
 
-            for _ in range(min(self.max_exemplars_per_class, len(indices))):
-                distances = torch.norm(class_mean - features_accum, dim=1)
-                min_idx = torch.argmin(distances).item()
-                selected_idxs.append(indices[min_idx])
-                exemplar_feats.append(features_accum[min_idx])
-                class_mean = (class_mean * len(selected_idxs) + features_accum[min_idx]) / (len(selected_idxs) + 1)
-                features_accum = torch.cat([features_accum[:min_idx], features_accum[min_idx+1:]], dim=0)
-                indices.pop(min_idx)
+                for _ in range(min(self.max_exemplars_per_class, len(indices))):
+                    distances = torch.norm(class_mean - features_accum, dim=1)
+                    min_idx = torch.argmin(distances).item()
+                    selected_idxs.append(indices[min_idx])
+                    exemplar_feats.append(features_accum[min_idx])
+                    class_mean = (class_mean * len(selected_idxs) + features_accum[min_idx]) / (len(selected_idxs) + 1)
+                    features_accum = torch.cat([features_accum[:min_idx], features_accum[min_idx+1:]], dim=0)
+                    indices.pop(min_idx)
 
-            self.exemplars[cls] = [dataset[idx] for idx in selected_idxs]
+                self.exemplars[cls] = [dataset[idx] for idx in selected_idxs]
+            else:
+                # Random exemplar selection
+                cls_indices = [i for i in range(len(dataset)) if dataset[i]['labels'].item() == cls]
+                selected_idxs = random.sample(cls_indices, min(self.max_exemplars_per_class, len(cls_indices)))
+                self.exemplars[cls] = [dataset[idx] for idx in selected_idxs]
 
     def get_exemplar_dataset(self):
         all_exemplars = []
@@ -130,7 +158,8 @@ class ExemplarHandler:
             all_exemplars.extend(samples)
         return all_exemplars
 
-def evaluate(model, dataloader, device, all_classes, full_model_acc=None, split_name='Test'):
+
+def evaluate(model, dataloader, device, all_classes, full_model_acc=None, split_name='Test', bias_correction=None):
     model.eval()
     preds, trues = [], []
     total_loss = 0
@@ -139,10 +168,13 @@ def evaluate(model, dataloader, device, all_classes, full_model_acc=None, split_
         for batch in dataloader:
             for k in batch:
                 batch[k] = batch[k].to(device)
-            outputs = model(**batch)
-            loss = criterion(outputs.logits, batch['labels'])
+            inputs = {k: v for k, v in batch.items() if k != 'labels'}
+            logits = model(**inputs)
+            if bias_correction is not None:
+                logits = bias_correction(logits)
+            loss = criterion(logits, batch['labels'])
             total_loss += loss.item() * batch['labels'].size(0)
-            pred = outputs.logits.argmax(dim=1)
+            pred = logits.argmax(dim=1)
             preds.extend(pred.cpu().tolist())
             trues.extend(batch['labels'].cpu().tolist())
 
@@ -158,17 +190,18 @@ def evaluate(model, dataloader, device, all_classes, full_model_acc=None, split_
 
     class_acc = []
     for cls in all_classes:
-        idxs = [i for i,t in enumerate(trues) if t == cls]
+        idxs = [i for i, t in enumerate(trues) if t == cls]
         if not idxs:
             class_acc.append(0)
             continue
-        class_correct = sum([preds[i]==trues[i] for i in idxs])
+        class_correct = sum([preds[i] == trues[i] for i in idxs])
         class_acc.append(class_correct / len(idxs))
 
-    if split_name == "Test":
+    if "test" in split_name.lower() or "val" in split_name.lower():
         print("\nClass-wise Test Accuracy:")
         for clss, cacc in zip(all_classes, class_acc):
             print(f"  {clss}: {cacc:.4f}")
+
 
     torch.cuda.empty_cache()
     return avg_loss, acc, p, r, f1, gil, class_acc
