@@ -1,0 +1,9 @@
+1. Download the relevant Datasets : RVL_CDIP and TObacco-3482
+2. Create ENVs using requiremnt files.
+3. For "RVL_CDIP" prepare the data using utils/dataprep.py
+3. Pre-Process the OCR extraction using the extraction files. For EAML "run_ocrextractorWtoken.sh" or LLMv3 "run_ocrextractorWtoken_bbox"
+4. Train base models: "run_eamlmodel.sh" or "run_llmv3.sh"### Adjust the Inputs
+5. For EAML based CIL and DIL, run the "run_classIL*.sh" and "run_domainIL*.sh"
+6. For LLMv3 based CIL and DIL, run the "run_llmv3_classIL*.sh" and "run_llmv3_domainIL*.sh"
+
+**** All the run script required input adjustments.
